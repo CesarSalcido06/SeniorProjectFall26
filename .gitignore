@@ -4,3 +4,8 @@ __pycache__/
 .pytest_cache/
 backend/.env
 backend/data/
+generator/.venv/
+generator/vendor/
+generator/data/
+generator/*.log
+backend/*.log

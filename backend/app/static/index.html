@@ -73,7 +73,8 @@ const kb = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n /
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 fetch('/api/config').then((r) => r.json()).then((c) => {
-  $('mode').textContent = `Meshy: ${c.meshy_mode}${c.meshy_mode === 'mock' ? ' (offline placeholder cube, no credits)' : ''} · Classifier: ${c.classifier}`;
+  const gen = { local: 'local GPU (Hunyuan3D, free)', meshy: 'Meshy API (uses credits)', mock: 'mock (placeholder cube, offline)' }[c.generator] || c.generator;
+  $('mode').textContent = `Generator: ${gen} · Classifier: ${c.classifier}`;
 });
 
 $('photo').addEventListener('change', () => {

@@ -192,7 +192,62 @@ class MockMeshy:
         return cube_glb(color) if name.endswith(".glb") else _thumbnail(color)
 
 
+# ---------------------------------------------------------------------------
+# Our own generator (generator/server.py, Hunyuan3D on the local GPU)
+# ---------------------------------------------------------------------------
+
+
+class LocalGeneratorClient:
+    """Speaks to generator/server.py and returns Meshy-shaped task dicts, so the worker doesn't care which it is."""
+
+    def __init__(self, base_url: str, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=60, transport=transport)
+
+    async def _get(self, path: str) -> dict:
+        try:
+            resp = await self._client.get(path)
+        except httpx.TransportError as exc:
+            raise MeshyError(f"Local generator unreachable at {self.base_url} ({type(exc).__name__}). Is it running?")
+        if resp.status_code == 404:
+            # Tasks live in the generator's memory; a restart forgets them
+            raise MeshyError("Local generator lost this task (it was restarted). Retry the job.")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def create_image_to_3d(self, image_uri: str, category: str) -> str:
+        try:
+            resp = await self._client.post("/tasks", json={"image_url": image_uri, "category": category, "texture": True})
+        except httpx.TransportError as exc:
+            raise MeshyError(f"Local generator unreachable at {self.base_url} ({type(exc).__name__}). Is it running?")
+        resp.raise_for_status()
+        return resp.json()["result"]
+
+    async def get_image_to_3d(self, task_id: str) -> dict:
+        task = await self._get(f"/tasks/{task_id}")
+        if task["status"] == "SUCCEEDED":
+            base = f"{self.base_url}/tasks/{task_id}/files"
+            task["model_urls"] = {"glb": f"{base}/model.glb"}
+            task["thumbnail_url"] = f"{base}/cutout.png"
+        if task.get("error"):
+            task["task_error"] = {"message": task["error"]}
+        return task
+
+    async def create_rigging(self, input_task_id: str, height_meters: float = 1.7) -> str:
+        raise MeshyError("rigging isn't available in the local generator yet")
+
+    async def get_rigging(self, task_id: str) -> dict:
+        raise MeshyError("rigging isn't available in the local generator yet")
+
+    async def download(self, url: str) -> bytes:
+        resp = await self._client.get(url, timeout=300)
+        resp.raise_for_status()
+        return resp.content
+
+
 def make_client(settings):
-    if settings.meshy_mode == "mock":
+    if settings.generator == "mock":
         return MockMeshy(settings.mock_seconds)
+    if settings.generator == "local":
+        return LocalGeneratorClient(settings.generator_url)
     return MeshyClient(settings.meshy_api_key, settings.meshy_base_url)

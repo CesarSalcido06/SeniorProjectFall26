@@ -135,3 +135,67 @@ def test_cube_glb_is_valid():
     data = cube_glb()
     magic, version, length = struct.unpack("<III", data[:12])
     assert (magic, version, length) == (0x46546C67, 2, len(data))
+
+
+def fake_generator_transport(fail=False):
+    """Stands in for generator/server.py."""
+    import httpx
+
+    state = {"polls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/tasks":
+            return httpx.Response(201, json={"result": "gen123"})
+        if path == "/tasks/gen123":
+            state["polls"] += 1
+            if fail:
+                return httpx.Response(200, json={"status": "FAILED", "progress": 30, "error": "CUDA out of memory"})
+            if state["polls"] < 2:
+                return httpx.Response(200, json={"status": "IN_PROGRESS", "progress": 50, "error": None})
+            return httpx.Response(200, json={"status": "SUCCEEDED", "progress": 100, "error": None})
+        if path == "/tasks/gen123/files/model.glb":
+            return httpx.Response(200, content=cube_glb())
+        if path == "/tasks/gen123/files/cutout.png":
+            return httpx.Response(200, content=photo_bytes())
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.fixture
+def local_client(tmp_path, monkeypatch, request):
+    from app.meshy import LocalGeneratorClient
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CLASSIFIER", "manual")
+    monkeypatch.setenv("MESHY_POLL_SECONDS", "0.05")
+    gen = LocalGeneratorClient("http://gen.test", transport=fake_generator_transport(fail=getattr(request, "param", False)))
+    with TestClient(create_app(Settings(), meshy=gen)) as c:
+        yield c
+
+
+def test_local_generator_prop(local_client):
+    job = wait_done(local_client, upload(local_client, "prop").json()["id"])
+    assert job["status"] == "done", job
+    assert {"model.glb", "thumbnail.png"} <= set(job["files"])
+
+
+def test_local_generator_character_keeps_unrigged_model(local_client):
+    job = wait_done(local_client, upload(local_client, "character").json()["id"])
+    assert job["status"] == "done"
+    assert job["rig_status"].startswith("failed: rigging isn't available")
+    assert "model.glb" in job["files"]
+
+
+@pytest.mark.parametrize("local_client", [True], indirect=True)
+def test_local_generator_failure_is_reported(local_client):
+    job = wait_done(local_client, upload(local_client, "prop").json()["id"])
+    assert job["status"] == "failed"
+    assert "CUDA out of memory" in job["error"]
+
+
+def test_generator_setting_validated(monkeypatch):
+    monkeypatch.setenv("GENERATOR", "blender")
+    with pytest.raises(ValueError):
+        Settings()

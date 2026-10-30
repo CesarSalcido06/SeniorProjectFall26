@@ -26,10 +26,15 @@ class Settings:
     def __init__(self) -> None:
         self.data_dir = Path(os.getenv("DATA_DIR", BACKEND_DIR / "data"))
 
-        # Meshy: "mock" runs offline with a generated placeholder model (no credits used).
-        # "live" calls the real API and needs MESHY_API_KEY. Default: live if a key is set.
+        # Which 3D generator to use:
+        #   local: our own Hunyuan3D service on this machine's GPU (generator/), free
+        #   meshy: Meshy's paid API, needs MESHY_API_KEY
+        #   mock:  offline placeholder cube, for building clients without a GPU or credits
         self.meshy_api_key = os.getenv("MESHY_API_KEY", "")
-        self.meshy_mode = os.getenv("MESHY_MODE", "live" if self.meshy_api_key else "mock")
+        self.generator = os.getenv("GENERATOR", "meshy" if self.meshy_api_key else "mock")
+        if self.generator not in ("local", "meshy", "mock"):
+            raise ValueError(f"GENERATOR must be local, meshy, or mock (got {self.generator!r})")
+        self.generator_url = os.getenv("GENERATOR_URL", "http://127.0.0.1:8100")
         self.meshy_base_url = os.getenv("MESHY_BASE_URL", "https://api.meshy.ai")
         self.meshy_poll_seconds = float(os.getenv("MESHY_POLL_SECONDS", "5"))
         self.mock_seconds = float(os.getenv("MOCK_SECONDS", "6"))

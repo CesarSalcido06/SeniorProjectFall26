@@ -32,7 +32,7 @@ queued → classifying → generating → rigging (characters only) → download
 ### `GET /api/jobs/{id}/files/{name}` — download a file (names come from the job's `files`)
 ### `POST /api/jobs/{id}/retry` — rerun a `failed` job (`409` otherwise)
 ### `DELETE /api/jobs/{id}` — delete a finished job and its files (`409` while running)
-### `GET /api/config` — `{"categories": [...], "meshy_mode": "mock"|"live", "classifier": "manual"|"openai"}`
+### `GET /api/config` — `{"categories": [...], "generator": "local"|"meshy"|"mock", "classifier": "manual"|"openai"}`
 ### `GET /api/health` — `{"status": "ok"}`
 
 ## Job object

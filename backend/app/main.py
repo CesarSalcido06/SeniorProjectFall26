@@ -56,7 +56,7 @@ def create_app(settings: Settings | None = None, meshy=None) -> FastAPI:
     def config():
         return {
             "categories": ["auto", *CATEGORIES],
-            "meshy_mode": settings.meshy_mode,
+            "generator": settings.generator,
             "classifier": settings.classifier,
             "max_upload_mb": settings.max_upload_mb,
         }

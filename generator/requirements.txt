@@ -1,0 +1,23 @@
+# torch==2.5.1 / torchvision==0.20.1 come from the CUDA 12.4 wheel index (see setup.sh)
+setuptools
+wheel
+ninja
+pybind11
+diffusers==0.32.2
+transformers==4.48.3
+accelerate==1.3.0
+huggingface_hub<0.30
+einops
+opencv-python-headless
+numpy<2
+omegaconf
+tqdm
+trimesh
+pymeshlab
+pygltflib
+xatlas
+rembg
+onnxruntime
+fastapi
+uvicorn[standard]
+pydantic
