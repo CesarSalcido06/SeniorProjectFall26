@@ -137,24 +137,29 @@ def test_cube_glb_is_valid():
     assert (magic, version, length) == (0x46546C67, 2, len(data))
 
 
-def fake_generator_transport(fail=False):
+def fake_generator_transport(fail=False, rig=True):
     """Stands in for generator/server.py."""
     import httpx
 
     state = {"polls": 0}
+    done = {"status": "SUCCEEDED", "progress": 100, "error": None}
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if request.method == "POST" and path == "/tasks":
             return httpx.Response(201, json={"result": "gen123"})
+        if request.method == "POST" and path == "/tasks/gen123/rig":
+            return httpx.Response(201, json={"result": "rig456"}) if rig else httpx.Response(501, text="UniRig isn't installed")
         if path == "/tasks/gen123":
             state["polls"] += 1
             if fail:
                 return httpx.Response(200, json={"status": "FAILED", "progress": 30, "error": "CUDA out of memory"})
             if state["polls"] < 2:
                 return httpx.Response(200, json={"status": "IN_PROGRESS", "progress": 50, "error": None})
-            return httpx.Response(200, json={"status": "SUCCEEDED", "progress": 100, "error": None})
-        if path == "/tasks/gen123/files/model.glb":
+            return httpx.Response(200, json={**done, "files": ["model.glb", "cutout.png", "model.fbx"]})
+        if path == "/tasks/rig456":
+            return httpx.Response(200, json={**done, "files": ["rigged.glb", "rigged.fbx"]})
+        if path.endswith(".glb") or path.endswith(".fbx"):
             return httpx.Response(200, content=cube_glb())
         if path == "/tasks/gen123/files/cutout.png":
             return httpx.Response(200, content=photo_bytes())
@@ -170,7 +175,8 @@ def local_client(tmp_path, monkeypatch, request):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CLASSIFIER", "manual")
     monkeypatch.setenv("MESHY_POLL_SECONDS", "0.05")
-    gen = LocalGeneratorClient("http://gen.test", transport=fake_generator_transport(fail=getattr(request, "param", False)))
+    opts = getattr(request, "param", {})
+    gen = LocalGeneratorClient("http://gen.test", transport=fake_generator_transport(**opts))
     with TestClient(create_app(Settings(), meshy=gen)) as c:
         yield c
 
@@ -178,17 +184,27 @@ def local_client(tmp_path, monkeypatch, request):
 def test_local_generator_prop(local_client):
     job = wait_done(local_client, upload(local_client, "prop").json()["id"])
     assert job["status"] == "done", job
-    assert {"model.glb", "thumbnail.png"} <= set(job["files"])
+    assert job["rig_status"] == "skipped"
+    assert set(job["files"]) == {"photo.jpg", "model.glb", "model.fbx", "thumbnail.png"}
 
 
-def test_local_generator_character_keeps_unrigged_model(local_client):
+@pytest.mark.parametrize("category", ["character", "creature"])
+def test_local_generator_rigs_characters_and_creatures(local_client, category):
+    job = wait_done(local_client, upload(local_client, category).json()["id"])
+    assert job["status"] == "done", job
+    assert job["rig_status"] == "rigged"
+    assert {"rigged.glb", "rigged.fbx", "model.glb"} <= set(job["files"])
+
+
+@pytest.mark.parametrize("local_client", [{"rig": False}], indirect=True)
+def test_local_generator_rig_unavailable_keeps_model(local_client):
     job = wait_done(local_client, upload(local_client, "character").json()["id"])
     assert job["status"] == "done"
-    assert job["rig_status"].startswith("failed: rigging isn't available")
-    assert "model.glb" in job["files"]
+    assert job["rig_status"].startswith("failed: Local generator refused rigging")
+    assert "model.glb" in job["files"] and "rigged.glb" not in job["files"]
 
 
-@pytest.mark.parametrize("local_client", [True], indirect=True)
+@pytest.mark.parametrize("local_client", [{"fail": True}], indirect=True)
 def test_local_generator_failure_is_reported(local_client):
     job = wait_done(local_client, upload(local_client, "prop").json()["id"])
     assert job["status"] == "failed"

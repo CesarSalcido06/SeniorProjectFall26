@@ -11,12 +11,12 @@ import uuid
 import httpx
 from PIL import Image
 
-# Generation settings per category. Meshy's auto-rig only supports humanoids, so only characters
-# get an A-pose (rigs cleanly) and a rigging pass; creatures come out as static meshes for now.
+# Meshy generation settings per category. Characters get an A-pose so they rig cleanly.
+# Which categories get rigged depends on the generator: see each client's `rig_categories`.
 PROFILES = {
-    "prop": {"pose_mode": "", "rig": False},
-    "character": {"pose_mode": "a-pose", "rig": True},
-    "creature": {"pose_mode": "", "rig": False},
+    "prop": {"pose_mode": ""},
+    "character": {"pose_mode": "a-pose"},
+    "creature": {"pose_mode": ""},
 }
 
 
@@ -39,6 +39,8 @@ class MeshyError(RuntimeError):
 
 
 class MeshyClient:
+    rig_categories = frozenset({"character"})  # Meshy's auto-rig only supports humanoids
+
     def __init__(self, api_key: str, base_url: str = "https://api.meshy.ai") -> None:
         if not api_key:
             raise MeshyError("MESHY_API_KEY is not set.")
@@ -145,6 +147,8 @@ def _thumbnail(color: tuple[float, float, float]) -> bytes:
 class MockMeshy:
     """Pretends each task takes `seconds` to finish. Files are generated on download."""
 
+    rig_categories = frozenset({"character"})
+
     def __init__(self, seconds: float = 6) -> None:
         self.seconds = seconds
         self._tasks: dict[str, dict] = {}
@@ -200,6 +204,9 @@ class MockMeshy:
 class LocalGeneratorClient:
     """Speaks to generator/server.py and returns Meshy-shaped task dicts, so the worker doesn't care which it is."""
 
+    # UniRig predicts a skeleton for any body plan, so creatures get rigged too
+    rig_categories = frozenset({"character", "creature"})
+
     def __init__(self, base_url: str, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=60, transport=transport)
@@ -223,21 +230,39 @@ class LocalGeneratorClient:
         resp.raise_for_status()
         return resp.json()["result"]
 
+    def _files(self, task_id: str, task: dict) -> dict:
+        return {name: f"{self.base_url}/tasks/{task_id}/files/{name}" for name in task.get("files", [])}
+
     async def get_image_to_3d(self, task_id: str) -> dict:
         task = await self._get(f"/tasks/{task_id}")
         if task["status"] == "SUCCEEDED":
-            base = f"{self.base_url}/tasks/{task_id}/files"
-            task["model_urls"] = {"glb": f"{base}/model.glb"}
-            task["thumbnail_url"] = f"{base}/cutout.png"
+            files = self._files(task_id, task)
+            task["model_urls"] = {fmt: files[f"model.{fmt}"] for fmt in ("glb", "fbx") if f"model.{fmt}" in files}
+            task["thumbnail_url"] = files.get("cutout.png")
         if task.get("error"):
             task["task_error"] = {"message": task["error"]}
         return task
 
     async def create_rigging(self, input_task_id: str, height_meters: float = 1.7) -> str:
-        raise MeshyError("rigging isn't available in the local generator yet")
+        try:
+            resp = await self._client.post(f"/tasks/{input_task_id}/rig")
+        except httpx.TransportError as exc:
+            raise MeshyError(f"Local generator unreachable at {self.base_url} ({type(exc).__name__}). Is it running?")
+        if resp.status_code >= 400:
+            raise MeshyError(f"Local generator refused rigging: HTTP {resp.status_code} {resp.text[:200]}")
+        return resp.json()["result"]
 
     async def get_rigging(self, task_id: str) -> dict:
-        raise MeshyError("rigging isn't available in the local generator yet")
+        task = await self._get(f"/tasks/{task_id}")
+        if task["status"] == "SUCCEEDED":
+            files = self._files(task_id, task)
+            task["result"] = {
+                "rigged_character_glb_url": files.get("rigged.glb"),
+                "rigged_character_fbx_url": files.get("rigged.fbx"),
+            }
+        if task.get("error"):
+            task["task_error"] = {"message": task["error"]}
+        return task
 
     async def download(self, url: str) -> bytes:
         resp = await self._client.get(url, timeout=300)

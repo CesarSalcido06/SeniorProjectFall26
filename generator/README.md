@@ -7,6 +7,14 @@ Our own replacement for Meshy's image-to-3D step, running on a local NVIDIA GPU 
 | Background removal | rembg (U²-Net) | MIT |
 | Photo → shape | Hunyuan3D-2mini turbo (0.6B) | Tencent Hunyuan 3D 2.0 Community License |
 | Shape → texture | Hunyuan3D-Paint v2.0 turbo | same |
+| Auto-rigging (skeleton + skin weights) | UniRig (SIGGRAPH 2025) | MIT |
+| GLB → FBX export | Blender 4.2 as a Python module (`bpy`) | GPL (used as a tool, not shipped) |
+
+UniRig predicts a skeleton for any body plan, so unlike Meshy (humanoids only) it rigs creatures too:
+a dog photo came back with a spine, tail chain, four legs, jaw, and ears. Its bones are named
+`bone_0…bone_N`, so Unity imports rigs as Generic, not Humanoid.
+
+Measured on an RTX 3060 (12 GB): generation ~1 min (7.9 GB peak VRAM), rigging ~2 min more.
 
 The Hunyuan license is free for us. It doesn't apply in the EU, UK, or South Korea, and organizations over
 1M monthly users need a separate license.
@@ -18,7 +26,8 @@ backend (GENERATOR=local) ──HTTP──> generator/server.py :8100 ──> GP
 ```
 
 The backend's `LocalGeneratorClient` (`backend/app/meshy.py`) creates a task, polls it, and downloads
-`model.glb` (textured) and `cutout.png` (the photo with its background removed, used as the thumbnail).
+`model.glb` + `model.fbx` (textured) and `cutout.png` (the photo with its background removed, used as the
+thumbnail). For characters and creatures it then asks for a rig and downloads `rigged.glb` + `rigged.fbx`.
 The API mirrors Meshy's, so nothing else in the backend changes.
 
 One task runs at a time. Models load on the first task and unload after `GPU_IDLE_SECONDS` without work.
@@ -31,7 +40,12 @@ Needs Linux, an NVIDIA GPU with 12 GB+, CUDA toolkit 12.4 (`/usr/local/cuda-12.4
 generator/setup.sh
 ```
 
-The first run downloads about 10 GB of model weights into `~/.cache/hy3dgen` and `~/.cache/huggingface`.
+The first run downloads about 10 GB of model weights into `~/.cache/hy3dgen` and `~/.cache/huggingface`,
+and the first rig downloads UniRig's checkpoint (about 5.5 GB).
+
+UniRig runs in its own environment (`.venv-unirig`, Python 3.11) because it needs Blender as a Python module.
+The generator calls it through subprocesses (`engines/unirig.py`, `tools/`). If it isn't installed, rigging
+returns `501` and jobs still finish with the unrigged model.
 
 ## Run
 
@@ -61,7 +75,9 @@ the MegaMan classifier is unavailable, so jobs uploaded as "auto" during that wi
 
 - `POST /tasks` `{"image_url": "data:image/jpeg;base64,...", "category": "prop", "texture": true}` → `{"result": "<task id>"}`
 - `GET /tasks/{id}` → `{"status": "PENDING|IN_PROGRESS|SUCCEEDED|FAILED", "progress": 0-100, "stage": "...", "seconds": 71.2, "faces": 40000, ...}`
-- `GET /tasks/{id}/files/model.glb`, `.../cutout.png`
+- `GET /tasks/{id}/files/model.glb`, `model.fbx`, `cutout.png`
+- `POST /tasks/{id}/rig` (on a finished generation task) → `{"result": "<rig task id>"}`; poll it like any task.
+  Files: `rigged.glb`, `rigged.fbx`. `501` if UniRig isn't installed.
 - `GET /health`
 
 Tasks are kept in memory: restarting the service forgets them (the backend then fails the job, and Retry works).

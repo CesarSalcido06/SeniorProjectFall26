@@ -24,4 +24,20 @@ uv pip install --python .venv/bin/python -r requirements.txt
 uv pip install --python .venv/bin/python --no-build-isolation \
   ./vendor/Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer \
   ./vendor/Hunyuan3D-2/hy3dgen/texgen/differentiable_renderer
+
+# --- UniRig (auto-rigging): Python 3.11 + Blender-as-a-module, so it gets its own environment ---
+UNIRIG_COMMIT=6793c6640ff01c8fb389f3993434124bb43d2933
+if [ ! -d vendor/UniRig ]; then
+  git clone https://github.com/VAST-AI-Research/UniRig.git vendor/UniRig
+fi
+git -C vendor/UniRig fetch -q origin "$UNIRIG_COMMIT" 2>/dev/null || true
+git -C vendor/UniRig checkout -q "$UNIRIG_COMMIT"
+[ -d .venv-unirig ] || uv venv --python 3.11 .venv-unirig
+uv pip install --python .venv-unirig/bin/python torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
+uv pip install --python .venv-unirig/bin/python -r requirements-unirig.txt
+uv pip install --python .venv-unirig/bin/python torch_scatter torch_cluster -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
+# Prebuilt flash-attention (compiling it takes about an hour)
+uv pip install --python .venv-unirig/bin/python \
+  "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
+
 echo "Done. Start with: .venv/bin/uvicorn server:app --host 127.0.0.1 --port 8100"

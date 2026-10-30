@@ -30,6 +30,9 @@ GPU_RELEASE_CMD = os.getenv("GPU_RELEASE_CMD", "")
 IDLE_SECONDS = float(os.getenv("GPU_IDLE_SECONDS", "120"))
 
 
+from engines import unirig  # noqa: E402
+
+
 def make_engine(name: str):
     if name == "hunyuan":
         from engines.hunyuan import HunyuanEngine
@@ -63,9 +66,27 @@ class Generator:
         task_dir.mkdir(parents=True, exist_ok=True)
         (task_dir / "input").write_bytes(base64.b64decode(b64))
         self.tasks[task_id] = {
-            "id": task_id, "status": "PENDING", "progress": 0, "stage": "queued", "category": req.category,
-            "texture": req.texture, "engine": self.engine.name, "files": [], "error": None,
-            "created_at": time.time(), "seconds": None,
+            "id": task_id, "kind": "generate", "status": "PENDING", "progress": 0, "stage": "queued",
+            "category": req.category, "texture": req.texture, "engine": self.engine.name, "files": [],
+            "error": None, "created_at": time.time(), "seconds": None,
+        }
+        self._queue.put(task_id)
+        return task_id
+
+    def submit_rig(self, source_id: str) -> str:
+        source = self.tasks.get(source_id)
+        if source is None or source["kind"] != "generate":
+            raise HTTPException(404, "Unknown generation task")
+        if source["status"] != "SUCCEEDED":
+            raise HTTPException(409, "Generation task hasn't finished")
+        if not unirig.available():
+            raise HTTPException(501, "UniRig isn't installed (see generator/README.md)")
+        task_id = uuid.uuid4().hex[:12]
+        (DATA_DIR / task_id).mkdir(parents=True, exist_ok=True)
+        self.tasks[task_id] = {
+            "id": task_id, "kind": "rig", "source": source_id, "status": "PENDING", "progress": 0,
+            "stage": "queued", "engine": "unirig", "files": [], "error": None, "created_at": time.time(),
+            "seconds": None,
         }
         self._queue.put(task_id)
         return task_id
@@ -105,6 +126,29 @@ class Generator:
             self._last_used = time.monotonic()
 
     def _run(self, task_id: str) -> None:
+        if self.tasks[task_id]["kind"] == "rig":
+            self._run_rig(task_id)
+        else:
+            self._run_generate(task_id)
+
+    def _run_rig(self, task_id: str) -> None:
+        task = self.tasks[task_id]
+        started = time.monotonic()
+        self._set(task_id, status="IN_PROGRESS", progress=1, stage="starting")
+        self._acquire_gpu()
+        # UniRig runs in its own processes and needs the VRAM the generator's models hold
+        self.engine.unload()
+
+        def progress(pct: int, stage: str) -> None:
+            self._set(task_id, progress=pct, stage=stage)
+
+        unirig.rig(DATA_DIR / task["source"] / "model.glb", DATA_DIR / task_id / "work", progress)
+        self._set(
+            task_id, status="SUCCEEDED", progress=100, stage="done", files=["rigged.glb", "rigged.fbx"],
+            seconds=round(time.monotonic() - started, 1),
+        )
+
+    def _run_generate(self, task_id: str) -> None:
         task = self.tasks[task_id]
         task_dir = DATA_DIR / task_id
         started = time.monotonic()
@@ -126,8 +170,15 @@ class Generator:
         mesh = self.engine.generate(cutout, texture=task["texture"], progress=progress)
         self._set(task_id, progress=95, stage="exporting")
         mesh.export(task_dir / "model.glb")
+        files = ["model.glb", "cutout.png"]
+        if unirig.available():  # its Blender module also does the FBX export
+            try:
+                unirig.to_fbx(task_dir / "model.glb", task_dir / "model.fbx", task_dir / "export.log")
+                files.append("model.fbx")
+            except unirig.StepFailed:
+                traceback.print_exc()  # GLB is enough to finish the task
         self._set(
-            task_id, status="SUCCEEDED", progress=100, stage="done", files=["model.glb", "cutout.png"],
+            task_id, status="SUCCEEDED", progress=100, stage="done", files=files,
             seconds=round(time.monotonic() - started, 1), faces=int(len(mesh.faces)),
         )
 
@@ -138,12 +189,20 @@ gen = Generator()
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "engine": gen.engine.name, "models_loaded": gen.engine.loaded, "queued": gen._queue.qsize()}
+    return {
+        "status": "ok", "engine": gen.engine.name, "rigging": "unirig" if unirig.available() else None,
+        "models_loaded": gen.engine.loaded, "queued": gen._queue.qsize(),
+    }
 
 
 @app.post("/tasks", status_code=201)
 def create_task(req: TaskRequest):
     return {"result": gen.submit(req)}
+
+
+@app.post("/tasks/{task_id}/rig", status_code=201)
+def rig_task(task_id: str):
+    return {"result": gen.submit_rig(task_id)}
 
 
 @app.get("/tasks/{task_id}")

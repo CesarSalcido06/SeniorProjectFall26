@@ -1,0 +1,18 @@
+# UniRig's requirements.txt, pinned to what was tested (torch/torch_scatter/flash_attn are in setup.sh)
+transformers==4.51.3
+python-box
+einops
+omegaconf
+pytorch_lightning
+lightning
+addict
+timm
+fast-simplification
+bpy==4.2.0
+trimesh
+open3d
+pyrender
+huggingface_hub<1
+wandb
+numpy==1.26.4
+spconv-cu124

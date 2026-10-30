@@ -69,21 +69,34 @@ queued → classifying → generating → rigging (characters only) → download
 ```
 
 - `category_source`: `user` (picked at upload), `classifier` (vision model decided), or `default` (classifier off or failed → `prop`; the reason is in `classifier_note`).
-- `rig_status`: `skipped` (prop/creature), `rigged`, or `failed: <reason>`. A failed rig still finishes the job with the unrigged model.
-- `files` only lists what exists. Props and creatures have no `rigged.*` or animation files. In mock mode there is no FBX and `rigged.glb` is the same placeholder cube without a skeleton.
+- `rig_status`: `skipped` (not rigged for this category), `rigged`, or `failed: <reason>`. A failed rig still finishes the job with the unrigged model.
+- `files` only lists what exists. What you get depends on the generator (`GET /api/config` → `generator`):
+
+| | `local` (our Hunyuan3D + UniRig) | `meshy` | `mock` |
+|---|---|---|---|
+| `model.glb` / `model.fbx` | ✓ / ✓ | ✓ / ✓ | ✓ / – |
+| Rigged categories | **character and creature** | character only | character (fake) |
+| `rigged.glb` / `rigged.fbx` | ✓ / ✓ | ✓ / ✓ | ✓ / – (cube, no skeleton) |
+| `walking.fbx` / `running.fbx` | – | ✓ (characters) | – |
+| Bone names | `bone_0…bone_N` (Generic rig) | Mixamo-style humanoid | – |
+| PBR maps | base color only | base color + metallic/roughness/normal | – |
+| Time per asset (RTX 3060) | ~2 min static, ~3–3.5 min rigged | ~2 min | ~6 s |
 
 ## What the Unity importer should use
 
 | Category | Import | Notes |
 |---|---|---|
-| prop | `model.fbx` (or `model.glb` via glTFast) | static mesh + collider |
-| creature | `model.fbx` | static for now: Meshy only auto-rigs humanoids |
-| character | `rigged.fbx` + `walking.fbx` / `running.fbx` | Humanoid avatar, Animator Controller with walk/run |
+| prop | `model.fbx` (or `model.glb` via glTFast) | static mesh + MeshCollider/BoxCollider |
+| creature | `rigged.fbx` if present, else `model.fbx` | **Generic** avatar (local generator) |
+| character | `rigged.fbx` (+ `walking.fbx` / `running.fbx` from Meshy) | Meshy: Humanoid avatar. Local: Generic avatar, since UniRig's bones aren't named |
 
-## Category → Meshy settings
+FBX files embed their textures. Scale: models are about 2 units tall (local) or real-world meters (Meshy).
 
-All jobs: `ai_model: latest`, textured with PBR maps, remeshed to 30k triangles, GLB + FBX output.
+## Category → generation settings
+
+**Local:** Hunyuan3D-2mini-turbo shape (≤40k faces), Hunyuan3D-Paint texture, UniRig skeleton + skin weights
+for characters and creatures. See `generator/README.md`.
+
+**Meshy:** `ai_model: latest`, textured with PBR maps, remeshed to 30k triangles, GLB + FBX output.
 Characters also get `pose_mode: a-pose` and a rigging pass (`height_meters: 1.7`).
-
-Meshy's rigging API only supports humanoid (bipedal) models, so creatures aren't rigged.
-That's narrower than the proposal, which assumed quadruped rigs too.
+Meshy's rigging API only supports humanoid (bipedal) models, so creatures aren't rigged there.

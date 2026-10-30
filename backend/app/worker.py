@@ -5,7 +5,7 @@ import time
 import traceback
 
 from .classifier import classify
-from .meshy import PROFILES, MeshyError
+from .meshy import MeshyError
 
 PHOTO_NAME = "photo.jpg"
 TASK_TIMEOUT_SECONDS = 20 * 60
@@ -79,7 +79,7 @@ class Worker:
         generated = await self._wait(job_id, self.meshy.get_image_to_3d, task_id, progress_span=(0, 80))
 
         rigged = None
-        if PROFILES[category]["rig"]:
+        if category in self.meshy.rig_categories:
             self.store.update(job_id, status="rigging")
             try:
                 rig_id = job["rig_task_id"] or await self.meshy.create_rigging(task_id)
@@ -129,7 +129,7 @@ class Worker:
                 return task
             if status in ("FAILED", "CANCELED"):
                 message = (task.get("task_error") or {}).get("message") or status.lower()
-                raise MeshyError(f"Meshy task {task_id} {status.lower()}: {message}")
+                raise MeshyError(f"Task {task_id} {status.lower()}: {message}")
             if time.monotonic() > deadline:
-                raise MeshyError(f"Meshy task {task_id} timed out after {TASK_TIMEOUT_SECONDS // 60} minutes")
+                raise MeshyError(f"Task {task_id} timed out after {TASK_TIMEOUT_SECONDS // 60} minutes")
             await asyncio.sleep(self.settings.meshy_poll_seconds)
