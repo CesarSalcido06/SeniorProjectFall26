@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Photo-to-Asset Test Console</title>
+  <!-- Test GUI only: the real phone app and desktop hub replace this -->
+  <script type="module" src="https://unpkg.com/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
+  <style>
+    :root { --bg: #f4f5f7; --card: #fff; --text: #1d2330; --muted: #667085; --line: #d9dde5; --accent: #2563eb; --bad: #c0362c; --good: #15803d; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #11141a; --card: #1a1f28; --text: #e6e9ef; --muted: #98a2b3; --line: #2c3340; --accent: #6b9cff; --bad: #ff7b70; --good: #4ade80; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 720px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 20px; margin: 4px 0 2px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-top: 14px; }
+    label { display: block; font-weight: 600; margin: 10px 0 6px; }
+    input[type=file], select { width: 100%; font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
+    .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+    button { font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 8px; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
+    button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: 6px 10px; font-size: 13px; }
+    button:disabled { opacity: .5; cursor: default; }
+    #preview { max-width: 100%; max-height: 240px; border-radius: 8px; margin-top: 10px; display: none; }
+    #msg { margin-top: 10px; min-height: 1.4em; }
+    .bad { color: var(--bad); } .good { color: var(--good); }
+    .job { display: grid; grid-template-columns: 72px 1fr; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+    .job:first-child { border-top: 0; }
+    .job img { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; background: var(--bg); }
+    .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin: 6px 0; }
+    .bar div { height: 100%; background: var(--accent); transition: width .4s; }
+    .files a { margin-right: 10px; font-size: 13px; color: var(--accent); }
+    model-viewer { width: 100%; height: 280px; background: var(--bg); border-radius: 8px; margin-top: 8px; }
+    code { font-size: 12px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Photo-to-Asset Test Console</h1>
+  <div class="muted" id="mode">Loading config…</div>
+
+  <form class="card" id="form">
+    <label for="photo">Photo of the object</label>
+    <input id="photo" name="photo" type="file" accept="image/*" capture="environment" required>
+    <img id="preview" alt="Selected photo">
+    <label for="category">Category</label>
+    <select id="category" name="category">
+      <option value="auto">Auto (let the classifier decide)</option>
+      <option value="prop">Prop (static object, no rig)</option>
+      <option value="character">Character (humanoid, gets rigged)</option>
+      <option value="creature">Creature (animal/monster)</option>
+    </select>
+    <div class="row">
+      <input id="force" name="force" type="checkbox" value="true">
+      <label for="force" style="margin:0;font-weight:400">Skip blur/lighting check</label>
+    </div>
+    <div class="row"><button id="submit">Upload &amp; generate</button></div>
+    <div id="msg" role="status"></div>
+  </form>
+
+  <section class="card">
+    <strong>Jobs</strong>
+    <div id="jobs"><div class="muted">No jobs yet.</div></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const msg = (text, cls = '') => { $('msg').textContent = text; $('msg').className = cls; };
+const kb = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+fetch('/api/config').then((r) => r.json()).then((c) => {
+  $('mode').textContent = `Meshy: ${c.meshy_mode}${c.meshy_mode === 'mock' ? ' (offline placeholder cube, no credits)' : ''} · Classifier: ${c.classifier}`;
+});
+
+$('photo').addEventListener('change', () => {
+  const file = $('photo').files[0];
+  if (!file) return;
+  $('preview').src = URL.createObjectURL(file);
+  $('preview').style.display = 'block';
+});
+
+$('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = new FormData();
+  body.append('photo', $('photo').files[0]);
+  body.append('category', $('category').value);
+  body.append('force', $('force').checked);
+  $('submit').disabled = true;
+  msg('Uploading…');
+  try {
+    const res = await fetch('/api/jobs', { method: 'POST', body });
+    const data = await res.json();
+    if (!res.ok) {
+      const q = data.quality && data.quality.sharpness !== undefined
+        ? ` (sharpness ${data.quality.sharpness}, brightness ${data.quality.brightness})` : '';
+      msg((typeof data.detail === 'string' ? data.detail : 'Upload failed') + q, 'bad');
+    } else {
+      msg(`Job ${data.id} queued.`, 'good');
+      refresh();
+    }
+  } catch (err) {
+    msg('Upload failed: ' + err.message, 'bad');
+  } finally {
+    $('submit').disabled = false;
+  }
+});
+
+function jobHtml(j) {
+  const f = j.files || {};
+  const thumb = f['thumbnail.png'] ? f['thumbnail.png'].url : (f['photo.jpg'] ? f['photo.jpg'].url : '');
+  const cat = j.category ? `${j.category} <span class="muted">(${esc(j.category_source)})</span>` : esc(j.requested_category);
+  const rig = j.rig_status ? ` · rig: ${esc(j.rig_status)}` : '';
+  const err = j.error ? `<div class="bad">${esc(j.error)}</div>` : '';
+  const note = j.classifier_note ? `<div class="muted">Classifier: ${esc(j.classifier_note)}</div>` : '';
+  const links = Object.entries(f).map(([n, i]) => `<a href="${i.url}" download>${n} (${kb(i.size)})</a>`).join('');
+  const glb = f['rigged.glb'] || f['model.glb'];
+  const viewer = j.status === 'done' && glb
+    ? `<model-viewer src="${glb.url}" camera-controls auto-rotate shadow-intensity="1" alt="Generated model"></model-viewer>` : '';
+  const retry = j.status === 'failed' ? `<button class="ghost" data-retry="${j.id}">Retry</button>` : '';
+  return `<div class="job" id="job-${j.id}">
+    <img src="${thumb}" alt="">
+    <div>
+      <div><strong>${esc(j.status)}</strong> · ${cat}${rig} <span class="muted">· ${j.id}</span></div>
+      <div class="bar"><div style="width:${j.progress}%"></div></div>
+      ${note}${err}
+      <div class="files">${links} ${retry}</div>
+      ${viewer}
+    </div>
+  </div>`;
+}
+
+async function refresh() {
+  const jobs = await fetch('/api/jobs?limit=20').then((r) => r.json()).catch(() => null);
+  if (!jobs) return;
+  if (!jobs.length) return;
+  // Re-render only jobs that changed, so 3D previews don't reload every poll
+  const box = $('jobs');
+  if (box.firstElementChild && box.firstElementChild.classList.contains('muted')) box.innerHTML = '';
+  for (const j of [...jobs].reverse()) {
+    const key = `${j.status}|${j.progress}|${j.rig_status}|${j.error}`;
+    let el = $('job-' + j.id);
+    if (el && el.dataset.key === key) continue;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = jobHtml(j);
+    const fresh = tmp.firstElementChild;
+    fresh.dataset.key = key;
+    if (el) el.replaceWith(fresh); else box.prepend(fresh);
+  }
+}
+
+$('jobs').addEventListener('click', async (e) => {
+  const id = e.target.dataset && e.target.dataset.retry;
+  if (!id) return;
+  await fetch(`/api/jobs/${id}/retry`, { method: 'POST' });
+  refresh();
+});
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
