@@ -8,9 +8,12 @@ import sys
 
 import bpy
 
+from blender_tidy import tidy
+
 src, dst = sys.argv[1], sys.argv[2]
 bpy.ops.wm.read_factory_settings(use_empty=True)
 bpy.ops.import_scene.gltf(filepath=src)
+tidy([o for o in bpy.data.objects if o.type == "MESH"])
 bpy.ops.export_scene.fbx(
     filepath=dst,
     path_mode="COPY",

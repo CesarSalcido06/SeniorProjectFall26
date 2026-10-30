@@ -76,6 +76,20 @@ The first task stops BenchAI, and BenchAI restarts 2 minutes after the last task
 the MegaMan classifier is unavailable, so jobs uploaded as "auto" during that window fall back to prop
 (the job's `classifier_note` says so). Pick the category by hand when uploading a batch.
 
+## Checking models with Autodesk's FBX SDK
+
+`tools/check_fbx.py` opens FBX files with Autodesk's own FBX SDK (the library Maya and 3ds Max use) and
+reports meshes, UVs, materials, textures, bones and skin weights. It exits non-zero on problems such as
+unweighted vertices or a texture with no file extension. Setup is in the script's docstring (Linux,
+Python 3.10, no Autodesk account needed).
+
+```bash
+.venv/bin/python tools/check_fbx.py ../backend/data/jobs/<job id>/*.fbx
+```
+
+Both FBX exports go through `tools/blender_tidy.py` first, which names the mesh `Model`, welds duplicate
+vertices (the rig step used to leave 5x the vertices), and names the embedded texture `Model_basecolor.png`.
+
 ## Endpoints
 
 - `POST /tasks` `{"image_url": "data:image/jpeg;base64,...", "category": "prop", "texture": true}` → `{"result": "<task id>"}`.

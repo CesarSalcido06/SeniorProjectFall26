@@ -10,6 +10,8 @@ import sys
 
 import bpy
 
+from blender_tidy import tidy
+
 src, out_glb, out_fbx = sys.argv[1:4]
 bpy.ops.wm.read_factory_settings(use_empty=True)
 bpy.ops.import_scene.gltf(filepath=src)
@@ -27,8 +29,7 @@ for obj in [o for o in bpy.data.objects if o.type == "MESH"]:
 meshes = [o for o in bpy.data.objects if o.type == "MESH"]
 if not meshes:
     sys.exit("no skinned mesh in rigged model")
-for i, obj in enumerate(meshes):
-    obj.name = "Model" if i == 0 else f"Model.{i}"
+tidy(meshes)
 
 bpy.ops.export_scene.gltf(filepath=out_glb, export_format="GLB", export_skins=True, export_animations=False)
 bpy.ops.export_scene.fbx(
