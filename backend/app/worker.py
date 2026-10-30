@@ -7,7 +7,14 @@ import traceback
 from .classifier import classify
 from .meshy import MeshyError
 
-PHOTO_NAME = "photo.jpg"
+PHOTO_NAME = "photo.jpg"  # the front view
+# Optional extra angles, in the order the multi-view model expects them around the object
+EXTRA_VIEWS = ("left", "back", "right")
+
+
+def view_photo_name(view: str) -> str:
+    return PHOTO_NAME if view == "front" else f"photo_{view}.jpg"
+
 TASK_TIMEOUT_SECONDS = 20 * 60
 
 # Meshy result key -> (our file name, kind). Kinds let the desktop hub pick what to import.
@@ -20,6 +27,10 @@ _ANIMATION_FILES = {
     "walking_fbx_url": ("walking.fbx", "animation"),
     "running_fbx_url": ("running.fbx", "animation"),
 }
+
+
+def _data_uri(jpeg: bytes) -> str:
+    return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
 
 
 class Worker:
@@ -72,8 +83,12 @@ class Worker:
 
         task_id = job["meshy_task_id"]
         if not task_id:
-            image_uri = "data:image/jpeg;base64," + base64.b64encode(photo).decode()
-            task_id = await self.meshy.create_image_to_3d(image_uri, category)
+            extra = {
+                view: _data_uri((job_dir / view_photo_name(view)).read_bytes())
+                for view in EXTRA_VIEWS
+                if view_photo_name(view) in job["files"]
+            }
+            task_id = await self.meshy.create_image_to_3d(_data_uri(photo), category, extra_views=extra)
             self.store.update(job_id, meshy_task_id=task_id)
         self.store.update(job_id, status="generating")
         generated = await self._wait(job_id, self.meshy.get_image_to_3d, task_id, progress_span=(0, 80))
@@ -93,7 +108,7 @@ class Worker:
             self.store.update(job_id, rig_status="skipped")
 
         self.store.update(job_id, status="downloading", progress=95)
-        files = {PHOTO_NAME: {"kind": "photo", "size": len(photo)}}
+        files = {name: info for name, info in job["files"].items() if info["kind"] == "photo"}
         downloads = []
         for key, (name, kind) in _MODEL_FILES.items():
             if url := (generated.get("model_urls") or {}).get(key):

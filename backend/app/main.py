@@ -13,7 +13,7 @@ from .config import CATEGORIES, Settings
 from .db import ACTIVE_STATUSES, JobStore
 from .images import PhotoRejected, process_photo
 from .meshy import make_client
-from .worker import PHOTO_NAME, Worker
+from .worker import Worker, view_photo_name
 
 STATIC_DIR = Path(__file__).parent / "static"
 _SAFE_NAME = re.compile(r"^[a-z0-9_.-]+$")
@@ -66,20 +66,36 @@ def create_app(settings: Settings | None = None, meshy=None) -> FastAPI:
         photo: UploadFile = File(...),
         category: str = Form("auto"),
         force: bool = Form(False),
+        left: UploadFile | None = File(None),
+        back: UploadFile | None = File(None),
+        right: UploadFile | None = File(None),
     ):
+        """`photo` is the front view. Optional extra angles help the local generator get the shape right."""
         if category != "auto" and category not in CATEGORIES:
             raise HTTPException(422, f"category must be one of: auto, {', '.join(CATEGORIES)}")
-        data = await photo.read()
-        try:
-            normalized, quality = process_photo(data, settings, force=force)
-        except PhotoRejected as exc:
-            return JSONResponse(status_code=422, content={"detail": exc.reason, "quality": exc.quality})
+        uploads = {"front": photo, "left": left, "back": back, "right": right}
+        photos = {}  # view -> (jpeg bytes, quality)
+        for view, upload in uploads.items():
+            if upload is None or (view != "front" and not upload.filename):
+                continue  # browsers send empty parts for unused file inputs
+            try:
+                photos[view] = process_photo(await upload.read(), settings, force=force)
+            except PhotoRejected as exc:
+                detail = exc.reason if view == "front" else f"{view.capitalize()} photo: {exc.reason}"
+                return JSONResponse(status_code=422, content={"detail": detail, "quality": exc.quality, "view": view})
 
+        normalized, quality = photos["front"]
         job = store.create(category, photo.filename or "photo", quality)
         job_dir = settings.job_dir(job["id"])
         job_dir.mkdir(parents=True, exist_ok=True)
-        (job_dir / PHOTO_NAME).write_bytes(normalized)
-        job = store.update(job["id"], files={PHOTO_NAME: {"kind": "photo", "size": len(normalized)}})
+        files = {}
+        for view, (data, view_quality) in photos.items():
+            name = view_photo_name(view)
+            (job_dir / name).write_bytes(data)
+            files[name] = {"kind": "photo", "view": view, "size": len(data)}
+            if view != "front":
+                files[name]["quality"] = view_quality
+        job = store.update(job["id"], files=files)
         worker.submit(job["id"])
         return public(job)
 

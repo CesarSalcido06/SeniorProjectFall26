@@ -19,13 +19,24 @@ queued → classifying → generating → rigging (characters only) → download
 
 | Field | Required | Values |
 |---|---|---|
-| `photo` | yes | JPG/PNG/WebP, max 15 MB, short side ≥ 512 px |
+| `photo` | yes | The **front** view. JPG/PNG/WebP, max 15 MB, short side ≥ 512 px |
+| `left`, `back`, `right` | no | Extra angles, same rules as `photo`. Send any subset |
 | `category` | no | `auto` (default), `prop`, `character`, `creature` |
 | `force` | no | `true` skips the blur/lighting check (not the size/format check) |
 
 - `201` → the new [job](#job-object).
-- `422` → photo rejected: `{"detail": "Photo looks blurry. …", "quality": {"sharpness": 41.2, "brightness": 96.0, …}}`.
-  Show `detail` to the user; it's written for them.
+- `422` → a photo was rejected: `{"detail": "Photo looks blurry. …", "quality": {"sharpness": 41.2, "brightness": 96.0, …}, "view": "front"}`.
+  For an extra angle, `detail` starts with the view (`"Back photo: …"`). Show `detail` to the user; it's written for them.
+  Nothing is created when any photo is rejected.
+
+#### Extra angles
+With any extra angle, the local generator switches to its multi-view shape model (Hunyuan3D-2mv), which
+gets the back and sides right instead of guessing them, and its texture pass uses every photo.
+Meshy and the mock use only the front photo.
+
+The views are a quarter turn apart around the object, named from the **object's** point of view
+(like stage left): `left` is the object's left side, so the photographer steps to *their* right.
+Keep the same distance and height for every shot, and don't move the object between shots.
 
 ### `GET /api/jobs?status=done&limit=100` — list jobs (newest first)
 ### `GET /api/jobs/{id}` — one job
@@ -56,7 +67,8 @@ queued → classifying → generating → rigging (characters only) → download
   "rig_status": "rigged",
   "error": null,
   "files": {
-    "photo.jpg":     {"kind": "photo",     "size": 412233,  "url": "/api/jobs/4181202781d3/files/photo.jpg"},
+    "photo.jpg":     {"kind": "photo", "view": "front", "size": 412233, "url": "/api/jobs/4181202781d3/files/photo.jpg"},
+    "photo_back.jpg": {"kind": "photo", "view": "back", "size": 398102, "quality": {"sharpness": 902.4, …}, "url": "…"},
     "model.glb":     {"kind": "model",     "size": 8123456, "url": "/api/jobs/4181202781d3/files/model.glb"},
     "model.fbx":     {"kind": "model",     "size": 9234567, "url": "…"},
     "thumbnail.png": {"kind": "thumbnail", "size": 120000,  "url": "…"},
@@ -70,6 +82,8 @@ queued → classifying → generating → rigging (characters only) → download
 
 - `category_source`: `user` (picked at upload), `classifier` (vision model decided), or `default` (classifier off or failed → `prop`; the reason is in `classifier_note`).
 - `rig_status`: `skipped` (not rigged for this category), `rigged`, or `failed: <reason>`. A failed rig still finishes the job with the unrigged model.
+- `quality` is the front photo's; each extra angle's is on its `files` entry. Photos are `photo.jpg` (front)
+  and `photo_left.jpg` / `photo_back.jpg` / `photo_right.jpg`.
 - `files` only lists what exists. What you get depends on the generator (`GET /api/config` → `generator`):
 
 | | `local` (our Hunyuan3D + UniRig) | `meshy` | `mock` |
@@ -94,7 +108,7 @@ FBX files embed their textures. Scale: models are about 2 units tall (local) or 
 
 ## Category → generation settings
 
-**Local:** Hunyuan3D-2mini-turbo shape (≤40k faces), Hunyuan3D-Paint texture, UniRig skeleton + skin weights
+**Local:** Hunyuan3D-2mini-turbo shape from one photo, Hunyuan3D-2mv-turbo from several (≤40k faces), Hunyuan3D-Paint texture, UniRig skeleton + skin weights
 for characters and creatures. See `generator/README.md`.
 
 **Meshy:** `ai_model: latest`, textured with PBR maps, remeshed to 30k triangles, GLB + FBX output.

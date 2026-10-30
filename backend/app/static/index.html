@@ -23,6 +23,10 @@
     button { font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 8px; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
     button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: 6px 10px; font-size: 13px; }
     button:disabled { opacity: .5; cursor: default; }
+    details { margin-top: 12px; }
+    summary { cursor: pointer; font-weight: 600; }
+    .views label { font-weight: 400; }
+    .views input { margin-top: 4px; }
     #preview { max-width: 100%; max-height: 240px; border-radius: 8px; margin-top: 10px; display: none; }
     #msg { margin-top: 10px; min-height: 1.4em; }
     .bad { color: var(--bad); } .good { color: var(--good); }
@@ -42,9 +46,22 @@
   <div class="muted" id="mode">Loading config…</div>
 
   <form class="card" id="form">
-    <label for="photo">Photo of the object</label>
+    <label for="photo">Front photo</label>
     <input id="photo" name="photo" type="file" accept="image/*" capture="environment" required>
     <img id="preview" alt="Selected photo">
+    <details id="angles">
+      <summary>More angles (optional, better shape)</summary>
+      <div class="muted">Keep the object still and the same distance away. Walk around it a quarter turn at a time.
+        The local generator uses these; Meshy and the mock only use the front photo.</div>
+      <div class="views">
+        <label>Left side <span class="muted">(the object's left: step to your right)</span>
+          <input name="left" type="file" accept="image/*" capture="environment"></label>
+        <label>Back
+          <input name="back" type="file" accept="image/*" capture="environment"></label>
+        <label>Right side <span class="muted">(the object's right: step to your left)</span>
+          <input name="right" type="file" accept="image/*" capture="environment"></label>
+      </div>
+    </details>
     <label for="category">Category</label>
     <select id="category" name="category">
       <option value="auto">Auto (let the classifier decide)</option>
@@ -88,6 +105,10 @@ $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const body = new FormData();
   body.append('photo', $('photo').files[0]);
+  for (const view of ['left', 'back', 'right']) {
+    const file = $('form').elements[view].files[0];
+    if (file) body.append(view, file);
+  }
   body.append('category', $('category').value);
   body.append('force', $('force').checked);
   $('submit').disabled = true;
@@ -114,6 +135,8 @@ function jobHtml(j) {
   const f = j.files || {};
   const thumb = f['thumbnail.png'] ? f['thumbnail.png'].url : (f['photo.jpg'] ? f['photo.jpg'].url : '');
   const cat = j.category ? `${j.category} <span class="muted">(${esc(j.category_source)})</span>` : esc(j.requested_category);
+  const views = Object.values(f).filter((i) => i.kind === 'photo').length;
+  const angles = views > 1 ? ` · ${views} angles` : '';
   const rig = j.rig_status ? ` · rig: ${esc(j.rig_status)}` : '';
   const err = j.error ? `<div class="bad">${esc(j.error)}</div>` : '';
   const note = j.classifier_note ? `<div class="muted">Classifier: ${esc(j.classifier_note)}</div>` : '';
@@ -125,7 +148,7 @@ function jobHtml(j) {
   return `<div class="job" id="job-${j.id}">
     <img src="${thumb}" alt="">
     <div>
-      <div><strong>${esc(j.status)}</strong> · ${cat}${rig} <span class="muted">· ${j.id}</span></div>
+      <div><strong>${esc(j.status)}</strong> · ${cat}${angles}${rig} <span class="muted">· ${j.id}</span></div>
       <div class="bar"><div style="width:${j.progress}%"></div></div>
       ${note}${err}
       <div class="files">${links} ${retry}</div>

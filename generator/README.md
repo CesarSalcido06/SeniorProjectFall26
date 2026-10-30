@@ -6,6 +6,7 @@ Our own replacement for Meshy's image-to-3D step, running on a local NVIDIA GPU 
 |---|---|---|
 | Background removal | rembg (U²-Net) | MIT |
 | Photo → shape | Hunyuan3D-2mini turbo (0.6B) | Tencent Hunyuan 3D 2.0 Community License |
+| Several angles → shape | Hunyuan3D-2mv turbo | same |
 | Shape → texture | Hunyuan3D-Paint v2.0 turbo | same |
 | Auto-rigging (skeleton + skin weights) | UniRig (SIGGRAPH 2025) | MIT |
 | GLB → FBX export | Blender 4.2 as a Python module (`bpy`) | GPL (used as a tool, not shipped) |
@@ -30,6 +31,10 @@ The backend's `LocalGeneratorClient` (`backend/app/meshy.py`) creates a task, po
 thumbnail). For characters and creatures it then asks for a rig and downloads `rigged.glb` + `rigged.fbx`.
 The API mirrors Meshy's, so nothing else in the backend changes.
 
+With extra angles (`views` below) the shape comes from the multi-view model, which sees the back and sides
+instead of inventing them, and the texture pass uses every photo. Only one shape model is on the GPU at a
+time; switching between single- and multi-view jobs reloads it (a few seconds).
+
 One task runs at a time. Models load on the first task and unload after `GPU_IDLE_SECONDS` without work.
 
 ## Setup (once)
@@ -41,7 +46,7 @@ generator/setup.sh
 ```
 
 The first run downloads about 10 GB of model weights into `~/.cache/hy3dgen` and `~/.cache/huggingface`,
-and the first rig downloads UniRig's checkpoint (about 5.5 GB).
+the first multi-view job about 5 GB more, and the first rig downloads UniRig's checkpoint (about 5.5 GB).
 
 UniRig runs in its own environment (`.venv-unirig`, Python 3.11) because it needs Blender as a Python module.
 The generator calls it through subprocesses (`engines/unirig.py`, `tools/`). If it isn't installed, rigging
@@ -73,7 +78,9 @@ the MegaMan classifier is unavailable, so jobs uploaded as "auto" during that wi
 
 ## Endpoints
 
-- `POST /tasks` `{"image_url": "data:image/jpeg;base64,...", "category": "prop", "texture": true}` → `{"result": "<task id>"}`
+- `POST /tasks` `{"image_url": "data:image/jpeg;base64,...", "category": "prop", "texture": true}` → `{"result": "<task id>"}`.
+  `image_url` is the front view. Add `"views": {"left": "data:...", "back": "data:...", "right": "data:..."}`
+  (any subset) for the multi-view model; left/right are the object's own sides.
 - `GET /tasks/{id}` → `{"status": "PENDING|IN_PROGRESS|SUCCEEDED|FAILED", "progress": 0-100, "stage": "...", "seconds": 71.2, "faces": 40000, ...}`
 - `GET /tasks/{id}/files/model.glb`, `model.fbx`, `cutout.png`
 - `POST /tasks/{id}/rig` (on a finished generation task) → `{"result": "<rig task id>"}`; poll it like any task.

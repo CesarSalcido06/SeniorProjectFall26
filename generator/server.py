@@ -41,10 +41,22 @@ def make_engine(name: str):
     raise ValueError(f"Unknown GENERATOR_ENGINE {name!r}")
 
 
+# Extra angles the multi-view model understands, beyond the front photo
+EXTRA_VIEWS = ("left", "back", "right")
+
+
 class TaskRequest(BaseModel):
-    image_url: str  # data:image/...;base64,... (same field name as Meshy)
+    image_url: str  # front photo, data:image/...;base64,... (same field name as Meshy)
     category: str = "prop"
     texture: bool = True
+    views: dict[str, str] = {}  # optional {"left"|"back"|"right": data URI}
+
+
+def _decode(uri: str, what: str) -> bytes:
+    header, _, b64 = uri.partition(",")
+    if not header.startswith("data:image/") or not b64:
+        raise HTTPException(400, f"{what} must be a base64 data URI")
+    return base64.b64decode(b64)
 
 
 class Generator:
@@ -58,16 +70,20 @@ class Generator:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def submit(self, req: TaskRequest) -> str:
-        header, _, b64 = req.image_url.partition(",")
-        if not header.startswith("data:image/") or not b64:
-            raise HTTPException(400, "image_url must be a base64 data URI")
+        unknown = set(req.views) - set(EXTRA_VIEWS)
+        if unknown:
+            raise HTTPException(400, f"Unknown views {sorted(unknown)}; use {', '.join(EXTRA_VIEWS)}")
+        inputs = {"front": _decode(req.image_url, "image_url")}
+        inputs.update({view: _decode(uri, f"views.{view}") for view, uri in req.views.items()})
         task_id = uuid.uuid4().hex[:12]
         task_dir = DATA_DIR / task_id
         task_dir.mkdir(parents=True, exist_ok=True)
-        (task_dir / "input").write_bytes(base64.b64decode(b64))
+        for view, data in inputs.items():
+            (task_dir / f"input_{view}").write_bytes(data)
         self.tasks[task_id] = {
             "id": task_id, "kind": "generate", "status": "PENDING", "progress": 0, "stage": "queued",
-            "category": req.category, "texture": req.texture, "engine": self.engine.name, "files": [],
+            "category": req.category, "texture": req.texture, "engine": self.engine.name,
+            "views": list(inputs), "files": [],
             "error": None, "created_at": time.time(), "seconds": None,
         }
         self._queue.put(task_id)
@@ -155,19 +171,21 @@ class Generator:
         self._set(task_id, status="IN_PROGRESS", progress=1, stage="loading models")
         self._acquire_gpu()
 
-        image = Image.open(io.BytesIO((task_dir / "input").read_bytes()))
         self._set(task_id, progress=5, stage="removing background")
         if self._rembg is None:
             from hy3dgen.rembg import BackgroundRemover
 
             self._rembg = BackgroundRemover()
-        cutout = self._rembg(image.convert("RGB"))
-        cutout.save(task_dir / "cutout.png")
+        cutouts = {}
+        for view in task["views"]:
+            image = Image.open(io.BytesIO((task_dir / f"input_{view}").read_bytes()))
+            cutouts[view] = self._rembg(image.convert("RGB"))
+            cutouts[view].save(task_dir / ("cutout.png" if view == "front" else f"cutout_{view}.png"))
 
         def progress(pct: int, stage: str) -> None:
             self._set(task_id, progress=pct, stage=stage)
 
-        mesh = self.engine.generate(cutout, texture=task["texture"], progress=progress)
+        mesh = self.engine.generate(cutouts, texture=task["texture"], progress=progress)
         self._set(task_id, progress=95, stage="exporting")
         mesh.export(task_dir / "model.glb")
         files = ["model.glb", "cutout.png"]

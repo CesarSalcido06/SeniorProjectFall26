@@ -58,7 +58,9 @@ class MeshyClient:
             raise MeshyError(f"Meshy {method} {path} -> HTTP {resp.status_code}: {message[:300]}")
         return resp.json()
 
-    async def create_image_to_3d(self, image_uri: str, category: str) -> str:
+    async def create_image_to_3d(self, image_uri: str, category: str, extra_views: dict | None = None) -> str:
+        # Only the front photo is sent: Meshy's multi-image endpoint is a separate task type that we
+        # haven't wired up (or been able to test without a paid key)
         data = await self._request("POST", "/openapi/v1/image-to-3d", json=generation_body(image_uri, category))
         return data["result"]
 
@@ -159,7 +161,7 @@ class MockMeshy:
             return {"status": "SUCCEEDED", "progress": 100}
         return {"status": "IN_PROGRESS", "progress": int(100 * elapsed / self.seconds)}
 
-    async def create_image_to_3d(self, image_uri: str, category: str) -> str:
+    async def create_image_to_3d(self, image_uri: str, category: str, extra_views: dict | None = None) -> str:
         task_id = "mock-" + uuid.uuid4().hex[:8]
         self._tasks[task_id] = {"started": time.monotonic(), "category": category}
         return task_id
@@ -222,9 +224,11 @@ class LocalGeneratorClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def create_image_to_3d(self, image_uri: str, category: str) -> str:
+    async def create_image_to_3d(self, image_uri: str, category: str, extra_views: dict | None = None) -> str:
+        """extra_views: {"left"|"back"|"right": data URI}. With any of them the generator uses its multi-view model."""
+        body = {"image_url": image_uri, "category": category, "texture": True, "views": extra_views or {}}
         try:
-            resp = await self._client.post("/tasks", json={"image_url": image_uri, "category": category, "texture": True})
+            resp = await self._client.post("/tasks", json=body)
         except httpx.TransportError as exc:
             raise MeshyError(f"Local generator unreachable at {self.base_url} ({type(exc).__name__}). Is it running?")
         resp.raise_for_status()

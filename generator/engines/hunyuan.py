@@ -1,6 +1,7 @@
-"""Hunyuan3D-2: Hunyuan3D-2mini-turbo for shape, Hunyuan3D-Paint v2.0 turbo for texture.
+"""Hunyuan3D-2: Hunyuan3D-2mini-turbo (one photo) or Hunyuan3D-2mv-turbo (several angles) for shape,
+Hunyuan3D-Paint v2.0 turbo for texture.
 
-Fits a 12 GB GPU: the shape model runs fully on the GPU, the paint model is CPU-offloaded.
+Fits a 12 GB GPU: one shape model at a time runs fully on the GPU, the paint model is CPU-offloaded.
 License: Tencent Hunyuan 3D 2.0 Community License (not valid in the EU, UK, or South Korea).
 """
 import sys
@@ -12,6 +13,9 @@ sys.path.insert(0, str(VENDOR))
 import torch  # noqa: E402
 
 SHAPE_REPO, SHAPE_SUBFOLDER = "tencent/Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini-turbo"
+# Multi-view model: takes front/left/back/right photos (any subset that includes front)
+MV_REPO, MV_SUBFOLDER = "tencent/Hunyuan3D-2mv", "hunyuan3d-dit-v2-mv-turbo"
+VIEW_ORDER = ("front", "left", "back", "right")
 PAINT_REPO, PAINT_SUBFOLDER = "tencent/Hunyuan3D-2", "hunyuan3d-paint-v2-0-turbo"
 
 
@@ -22,38 +26,46 @@ class HunyuanEngine:
         self.max_faces = max_faces
         self.octree_resolution = octree_resolution
         self._shape = None
+        self._shape_kind = None  # "single" or "multiview"
         self._paint = None
         self._cleanup = None
 
     @property
     def loaded(self) -> bool:
-        return self._shape is not None
+        return self._paint is not None
 
-    def load(self) -> None:
-        if self.loaded:
-            return
+    def load(self, multiview: bool = False) -> None:
         from hy3dgen.shapegen import DegenerateFaceRemover, FaceReducer, FloaterRemover, Hunyuan3DDiTFlowMatchingPipeline
         from hy3dgen.texgen import Hunyuan3DPaintPipeline
 
-        shape = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-            SHAPE_REPO, subfolder=SHAPE_SUBFOLDER, use_safetensors=False, device="cuda"
-        )
-        shape.enable_flashvdm(topk_mode="merge")
-        paint = Hunyuan3DPaintPipeline.from_pretrained(PAINT_REPO, subfolder=PAINT_SUBFOLDER)
-        paint.enable_model_cpu_offload()  # without this, shape + paint don't fit in 12 GB
-        self._shape, self._paint = shape, paint
-        self._cleanup = (FloaterRemover(), DegenerateFaceRemover(), FaceReducer())
+        kind = "multiview" if multiview else "single"
+        if self._shape_kind != kind:
+            # Only one shape model fits next to the paint model, so swap rather than keep both
+            self._shape = self._shape_kind = None
+            torch.cuda.empty_cache()
+            repo, subfolder = (MV_REPO, MV_SUBFOLDER) if multiview else (SHAPE_REPO, SHAPE_SUBFOLDER)
+            shape = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+                repo, subfolder=subfolder, use_safetensors=False, device="cuda"
+            )
+            shape.enable_flashvdm(topk_mode="merge")
+            self._shape, self._shape_kind = shape, kind
+        if self._paint is None:
+            paint = Hunyuan3DPaintPipeline.from_pretrained(PAINT_REPO, subfolder=PAINT_SUBFOLDER)
+            paint.enable_model_cpu_offload()  # without this, shape + paint don't fit in 12 GB
+            self._paint = paint
+            self._cleanup = (FloaterRemover(), DegenerateFaceRemover(), FaceReducer())
 
     def unload(self) -> None:
-        self._shape = self._paint = self._cleanup = None
+        self._shape = self._shape_kind = self._paint = self._cleanup = None
         torch.cuda.empty_cache()
 
-    def generate(self, image, texture: bool, progress) -> "trimesh.Trimesh":
-        """image: RGBA PIL image with the background already removed."""
-        self.load()
-        progress(10, "shape")
+    def generate(self, images: dict, texture: bool, progress) -> "trimesh.Trimesh":
+        """images: {"front": RGBA PIL image, optionally "left"/"back"/"right"}, backgrounds already removed."""
+        multiview = len(images) > 1
+        self.load(multiview)
+        progress(10, "shape (multi-view)" if multiview else "shape")
         mesh = self._shape(
-            image=image,
+            image=images if multiview else images["front"],
             num_inference_steps=5,
             octree_resolution=self.octree_resolution,
             num_chunks=20000,
@@ -65,4 +77,5 @@ class HunyuanEngine:
         if not texture:
             return mesh
         progress(45, "texture")
-        return self._paint(mesh, image=image)
+        # The paint model takes several reference photos; front first, since it's the main one
+        return self._paint(mesh, image=[images[v] for v in VIEW_ORDER if v in images])

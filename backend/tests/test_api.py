@@ -39,8 +39,10 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
-def upload(client, category="auto", data=None, force=False):
+def upload(client, category="auto", data=None, force=False, views=None):
     files = {"photo": ("mug.jpg", data or photo_bytes(), "image/jpeg")}
+    for view, view_data in (views or {}).items():
+        files[view] = (f"{view}.jpg", view_data, "image/jpeg")
     return client.post("/api/jobs", files=files, data={"category": category, "force": str(force).lower()})
 
 
@@ -131,14 +133,40 @@ def test_parse_category():
     assert parse_category("a vehicle") is None
 
 
+def test_extra_views_are_stored(client):
+    res = upload(client, "prop", views={"back": photo_bytes(), "left": photo_bytes()})
+    assert res.status_code == 201, res.text
+    job = wait_done(client, res.json()["id"])
+    assert job["status"] == "done", job
+    photos = {n: f["view"] for n, f in job["files"].items() if f["kind"] == "photo"}
+    assert photos == {"photo.jpg": "front", "photo_back.jpg": "back", "photo_left.jpg": "left"}
+    assert job["files"]["photo_back.jpg"]["quality"]["sharpness"] > 100
+
+
+def test_bad_extra_view_rejected_and_named(client):
+    res = upload(client, "prop", views={"right": photo_bytes(blur=8)})
+    assert res.status_code == 422
+    assert res.json()["detail"].startswith("Right photo:") and res.json()["view"] == "right"
+    assert client.get("/api/jobs").json() == []
+
+
+def test_empty_extra_view_is_ignored(client):
+    files = {"photo": ("mug.jpg", photo_bytes(), "image/jpeg"), "back": ("", b"", "application/octet-stream")}
+    res = client.post("/api/jobs", files=files, data={"category": "prop"})
+    assert res.status_code == 201, res.text
+    assert set(res.json()["files"]) == {"photo.jpg"}
+
+
 def test_cube_glb_is_valid():
     data = cube_glb()
     magic, version, length = struct.unpack("<III", data[:12])
     assert (magic, version, length) == (0x46546C67, 2, len(data))
 
 
-def fake_generator_transport(fail=False, rig=True):
-    """Stands in for generator/server.py."""
+def fake_generator_transport(fail=False, rig=True, requests=None):
+    """Stands in for generator/server.py. Task bodies it receives are appended to `requests`."""
+    import json
+
     import httpx
 
     state = {"polls": 0}
@@ -147,6 +175,8 @@ def fake_generator_transport(fail=False, rig=True):
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if request.method == "POST" and path == "/tasks":
+            if requests is not None:
+                requests.append(json.loads(request.content))
             return httpx.Response(201, json={"result": "gen123"})
         if request.method == "POST" and path == "/tasks/gen123/rig":
             return httpx.Response(201, json={"result": "rig456"}) if rig else httpx.Response(501, text="UniRig isn't installed")
@@ -209,6 +239,22 @@ def test_local_generator_failure_is_reported(local_client):
     job = wait_done(local_client, upload(local_client, "prop").json()["id"])
     assert job["status"] == "failed"
     assert "CUDA out of memory" in job["error"]
+
+
+def test_local_generator_gets_extra_views(tmp_path, monkeypatch):
+    from app.meshy import LocalGeneratorClient
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CLASSIFIER", "manual")
+    monkeypatch.setenv("MESHY_POLL_SECONDS", "0.05")
+    sent = []
+    gen = LocalGeneratorClient("http://gen.test", transport=fake_generator_transport(requests=sent))
+    with TestClient(create_app(Settings(), meshy=gen)) as c:
+        job = wait_done(c, upload(c, "prop", views={"back": photo_bytes()}).json()["id"])
+    assert job["status"] == "done", job
+    assert set(sent[0]["views"]) == {"back"}
+    assert sent[0]["views"]["back"].startswith("data:image/jpeg;base64,")
+    assert "photo_back.jpg" in job["files"]
 
 
 def test_generator_setting_validated(monkeypatch):
