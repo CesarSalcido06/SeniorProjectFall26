@@ -38,6 +38,8 @@ _JSON_FIELDS = ("quality", "files")
 
 class JobStore:
     def __init__(self, path: Path) -> None:
+        # Called as listener(job_id, job) after every change; job is None once deleted (see firebase_sync.py)
+        self.listeners: list = []
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -54,9 +56,13 @@ class JobStore:
             job[field] = json.loads(job[field]) if job[field] else ({} if field == "files" else None)
         return job
 
-    def create(self, requested_category: str, original_name: str, quality: dict) -> dict:
+    def _notify(self, job_id: str, job: Optional[dict]) -> None:
+        for listener in self.listeners:
+            listener(job_id, job)
+
+    def create(self, requested_category: str, original_name: str, quality: dict, job_id: Optional[str] = None) -> dict:
         now = time.time()
-        job_id = uuid.uuid4().hex[:12]
+        job_id = job_id or uuid.uuid4().hex[:12]
         with self._lock:
             self._conn.execute(
                 "INSERT INTO jobs (id, created_at, updated_at, status, requested_category, original_name, quality)"
@@ -64,7 +70,9 @@ class JobStore:
                 (job_id, now, now, requested_category, original_name, json.dumps(quality)),
             )
             self._conn.commit()
-        return self.get(job_id)
+        job = self.get(job_id)
+        self._notify(job_id, job)
+        return job
 
     def get(self, job_id: str) -> Optional[dict]:
         with self._lock:
@@ -91,12 +99,15 @@ class JobStore:
         with self._lock:
             self._conn.execute(f"UPDATE jobs SET {assignments} WHERE id = ?", (*fields.values(), job_id))
             self._conn.commit()
-        return self.get(job_id)
+        job = self.get(job_id)
+        self._notify(job_id, job)
+        return job
 
     def delete(self, job_id: str) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             self._conn.commit()
+        self._notify(job_id, None)
 
     def unfinished(self) -> list[dict]:
         marks = ",".join("?" * len(ACTIVE_STATUSES))

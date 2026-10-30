@@ -30,6 +30,15 @@ cd backend && python3 -m pytest -q
 ```
 
 They run the whole pipeline against the mock: upload → classify → generate → rig → download.
+The Firebase tests (`tests/test_firebase.py`) skip unless the emulators are running; see
+[`../firebase/README.md`](../firebase/README.md#tests).
+
+## Firebase
+
+Set `FIREBASE_PROJECT_ID` (see `.env.example`) and the backend also works through Firebase: the capture app in
+`firebase/public/capture/` uploads photos to Storage and creates a Firestore document, and the backend picks it up.
+Every job, however it arrived, is copied to Firestore `jobs/{id}` with its files in Storage. Step-by-step setup,
+including running it all locally on the emulators, is in [`../firebase/README.md`](../firebase/README.md).
 
 ## Layout
 
@@ -38,7 +47,9 @@ They run the whole pipeline against the mock: upload → classify → generate �
 | `app/main.py` | HTTP routes |
 | `app/images.py` | Rejects blurry/dark/tiny photos, fixes rotation, strips EXIF, resizes to ≤2048 px JPEG |
 | `app/classifier.py` | Vision-model prompt and call (any OpenAI-compatible endpoint) |
-| `app/meshy.py` | Meshy API client, per-category settings, offline mock |
+| `app/intake.py` | Checks every uploaded photo and creates the job (shared by the API and Firebase) |
+| `app/meshy.py` | Generator clients: Meshy, the local GPU generator, and the offline mock |
+| `app/firebase_sync.py` | Optional Firebase link: takes jobs from the capture app, mirrors every job to Firestore + Storage |
 | `app/worker.py` | Background job runner; resumes unfinished jobs on restart |
 | `app/db.py` | SQLite job store |
 | `app/static/index.html` | Test GUI |

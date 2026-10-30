@@ -9,3 +9,13 @@ generator/vendor/
 generator/data/
 generator/*.log
 backend/*.log
+generator/.venv-unirig/
+
+# Firebase: CLI cache, emulator logs, and keys (a service account key gives full access to the project)
+firebase/.firebase/
+firebase-debug.log*
+firestore-debug.log*
+database-debug.log*
+ui-debug.log*
+*serviceAccount*.json
+*-firebase-adminsdk-*.json

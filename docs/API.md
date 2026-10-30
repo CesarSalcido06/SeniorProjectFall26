@@ -3,6 +3,10 @@
 The contract between the backend (Cesar) and the clients: the phone capture app and the desktop hub (Daniel).
 Base URL in development: `http://<backend-host>:8000`. All responses are JSON unless noted. CORS is open.
 
+Apps can also go through **Firebase** instead of calling this API: upload photos to Storage, create a
+Firestore `jobs/{id}` document, and watch it. The backend mirrors every job there either way. The document
+fields are listed at the top of `backend/app/firebase_sync.py`; setup is in `firebase/README.md`.
+
 ## Job lifecycle
 
 ```

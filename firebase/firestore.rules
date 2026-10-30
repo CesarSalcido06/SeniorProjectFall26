@@ -1,0 +1,42 @@
+rules_version = '2';
+
+// Who can read and write the `jobs` collection.
+//
+// How a job flows (see README.md):
+//   1. The capture app (public/capture/) uploads photos to Storage, then creates jobs/{jobId}
+//      with status "uploaded". That's the only write a browser can make.
+//   2. The backend (backend/app/firebase_sync.py) claims it and writes every later change
+//      (status, progress, files...). It uses the Admin SDK, which skips these rules entirely.
+//
+// Everyone has to be signed in. The capture app signs in anonymously, so turn on
+// Authentication > Sign-in method > Anonymous in the Firebase console before deploying.
+// (The local emulator needs nothing turned on.)
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /jobs/{jobId} {
+      // Any signed-in user can watch jobs: the phone shows its own, the desktop hub lists all of them
+      allow read: if request.auth != null;
+
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(["status", "owner", "category", "force", "views", "originalName", "createdAt", "source"])
+        && request.resource.data.status == "uploaded"
+        && request.resource.data.owner == request.auth.uid
+        && request.resource.data.category in ["auto", "prop", "character", "creature"]
+        && request.resource.data.force is bool
+        && request.resource.data.views is list
+        && request.resource.data.views.size() >= 1
+        && request.resource.data.views.size() <= 4
+        && request.resource.data.views.hasAll(["front"])
+        && request.resource.data.views.hasOnly(["front", "left", "back", "right"])
+        && request.resource.data.createdAt == request.time;
+
+      // People can clear their own finished jobs from the list (the backend keeps its copy)
+      allow delete: if request.auth != null
+        && resource.data.owner == request.auth.uid
+        && resource.data.status in ["done", "failed", "rejected"];
+
+      // Only the backend changes jobs
+      allow update: if false;
+    }
+  }
+}

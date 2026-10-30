@@ -4,3 +4,4 @@ python-multipart==0.0.32
 httpx==0.28.1
 pillow==11.3.0
 pytest==9.0.2
+firebase-admin==7.7.0  # only needed when FIREBASE_PROJECT_ID is set (firebase_sync.py)

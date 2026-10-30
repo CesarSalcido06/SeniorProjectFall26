@@ -1,0 +1,25 @@
+rules_version = '2';
+
+// Who can read and write files in Cloud Storage.
+//
+//   uploads/{jobId}/{view}.jpg   photos from the capture app (front, left, back, right)
+//   jobs/{jobId}/{file}          everything the backend produces (model.glb, rigged.fbx, ...)
+//
+// The backend uses the Admin SDK, which skips these rules, so it can write jobs/ and read uploads/.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /uploads/{jobId}/{photo} {
+      allow read: if request.auth != null;
+      // One photo per view, images only, same 15 MB limit as the backend
+      allow create: if request.auth != null
+        && photo.matches('(front|left|back|right)[.]jpg')
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size < 15 * 1024 * 1024;
+    }
+
+    match /jobs/{jobId}/{file} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+  }
+}

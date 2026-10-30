@@ -57,6 +57,21 @@ class Settings:
 
         self.max_concurrent_jobs = int(os.getenv("MAX_CONCURRENT_JOBS", "2"))
 
+        # Firebase link (firebase_sync.py). Off unless FIREBASE_PROJECT_ID is set.
+        #   FIREBASE_EMULATORS=true: talk to the local emulators (`firebase emulators:start` in firebase/).
+        #     No credentials or Blaze plan needed; this is the setup for development.
+        #   FIREBASE_EMULATORS=false: talk to the real project. Needs FIREBASE_CREDENTIALS (a service account
+        #     key file) and, for Storage, the Blaze plan. See firebase/README.md.
+        self.firebase_project_id = os.getenv("FIREBASE_PROJECT_ID", "")
+        self.firebase_emulators = os.getenv("FIREBASE_EMULATORS", "true").lower() in ("1", "true", "yes")
+        self.firebase_storage_bucket = os.getenv(
+            "FIREBASE_STORAGE_BUCKET", f"{self.firebase_project_id}.firebasestorage.app"
+        )
+        self.firebase_credentials = os.getenv("FIREBASE_CREDENTIALS", "")
+        # Where the emulators are; the defaults match firebase/firebase.json
+        self.firestore_emulator_host = os.getenv("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
+        self.storage_emulator_host = os.getenv("FIREBASE_STORAGE_EMULATOR_HOST", "127.0.0.1:9199")
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "jobs.db"
