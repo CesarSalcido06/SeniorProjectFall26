@@ -40,4 +40,8 @@ uv pip install --python .venv-unirig/bin/python torch_scatter torch_cluster -f h
 uv pip install --python .venv-unirig/bin/python \
   "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
 
+# --- Photogrammetry scans (COLMAP): brings its own CUDA libraries, so it gets its own environment too ---
+[ -d .venv-scan ] || uv venv --python 3.11 .venv-scan
+uv pip install --python .venv-scan/bin/python -r requirements-scan.txt
+
 echo "Done. Start with: .venv/bin/uvicorn server:app --host 127.0.0.1 --port 8100"

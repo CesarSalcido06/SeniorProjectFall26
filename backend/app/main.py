@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import CATEGORIES, Settings
 from .db import ACTIVE_STATUSES, JobStore
+from .images import PhotoRejected, process_photo
 from . import intake
 from .meshy import make_client
 from .worker import Worker
@@ -71,7 +72,65 @@ def create_app(settings: Settings | None = None, meshy=None) -> FastAPI:
             "classifier": settings.classifier,
             "max_upload_mb": settings.max_upload_mb,
             "firebase": settings.firebase_project_id or None,
+            "scan": hasattr(worker.meshy, "create_scan"),
+            "scan_min_photos": settings.scan_min_photos,
+            "scan_max_photos": settings.scan_max_photos,
+            "scan_max_side": settings.scan_max_side,
         }
+
+    @app.post("/api/scans", status_code=201)
+    def create_scan():
+        """Opens a photogrammetry scan. Photos then come one at a time, so a dropped connection only costs one."""
+        if not hasattr(worker.meshy, "create_scan"):
+            raise HTTPException(501, "Scans need GENERATOR=local")
+        return public(store.create_scan(None))
+
+    @app.post("/api/scans/{job_id}/photos", status_code=201)
+    async def add_scan_photo(job_id: str, photo: UploadFile = File(...)):
+        data = await photo.read()
+        job = get_or_404(job_id)
+        if job["mode"] != "scan" or job["status"] != "uploading":
+            raise HTTPException(409, "This scan isn't accepting photos")
+        try:
+            # Never rejected for blur: one soft photo is fine in a set of 40. Blurry ones get flagged instead.
+            jpeg, quality = process_photo(data, settings, force=True, max_side=settings.scan_max_side, jpeg_quality=95)
+        except PhotoRejected as exc:
+            return JSONResponse(status_code=422, content={"detail": exc.reason, "quality": exc.quality})
+        # No awaits from here to the update, so photos uploading side by side can't overwrite each other
+        job = get_or_404(job_id)
+        if job["status"] != "uploading":
+            raise HTTPException(409, "This scan isn't accepting photos")
+        count = sum(1 for info in job["files"].values() if info.get("view") == "scan")
+        if count >= settings.scan_max_photos:
+            raise HTTPException(422, f"A scan can use at most {settings.scan_max_photos} photos")
+        name = f"scan_{count + 1:04d}.jpg"
+        job_dir = settings.job_dir(job_id)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / name).write_bytes(jpeg)
+        blurry = quality["sharpness"] < settings.blur_threshold
+        files = {**job["files"], name: {"kind": "photo", "view": "scan", "size": len(jpeg), "blurry": blurry}}
+        store.update(job_id, files=files)
+        return {"name": name, "count": count + 1, "blurry": blurry}
+
+    @app.post("/api/scans/{job_id}/start")
+    async def start_scan(  # async: worker.submit needs the event loop
+        job_id: str, longest_mm: float | None = Form(None), ai_depth: bool = Form(True), ai_fill: bool = Form(True),
+    ):
+        """longest_mm is the piece's longest side measured with a ruler; it sets the model's real size.
+
+        ai_depth estimates plain faces the scan can't measure. ai_fill patches what no photo saw from an AI model.
+        """
+        job = get_or_404(job_id)
+        if job["mode"] != "scan" or job["status"] != "uploading":
+            raise HTTPException(409, "This scan already started")
+        if longest_mm is not None and longest_mm <= 0:
+            raise HTTPException(422, "The longest side must be above zero.")
+        count = sum(1 for info in job["files"].values() if info.get("view") == "scan")
+        if count < settings.scan_min_photos:
+            raise HTTPException(422, f"A scan needs at least {settings.scan_min_photos} photos (it has {count}).")
+        job = store.update(job_id, status="queued", progress=0, scan={"longest_mm": longest_mm, "ai_depth": ai_depth, "ai_fill": ai_fill})
+        worker.submit(job_id)
+        return public(job)
 
     @app.post("/api/jobs", status_code=201)
     async def create_job(
@@ -115,12 +174,12 @@ def create_app(settings: Settings | None = None, meshy=None) -> FastAPI:
         return FileResponse(settings.job_dir(job_id) / name, filename=f"{job_id}-{name}")
 
     @app.post("/api/jobs/{job_id}/retry")
-    def retry_job(job_id: str):
+    async def retry_job(job_id: str):  # async: worker.submit needs the event loop
         job = get_or_404(job_id)
         if job["status"] != "failed":
             raise HTTPException(409, "Only failed jobs can be retried")
         # Start over from generation; keep the classification
-        job = store.update(job_id, status="queued", progress=0, error=None, meshy_task_id=None, rig_task_id=None, rig_status=None)
+        job = store.update(job_id, status="queued", progress=0, stage=None, error=None, meshy_task_id=None, rig_task_id=None, rig_status=None)
         worker.submit(job_id)
         return public(job)
 

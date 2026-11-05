@@ -1,0 +1,8 @@
+# Photogrammetry (tools/scan_pipeline.py, tools/scan_fill.py). Python 3.11, its own environment: .venv-scan
+pycolmap-cuda12==4.2.1
+numpy
+scipy
+pillow
+trimesh
+fast-simplification
+networkx

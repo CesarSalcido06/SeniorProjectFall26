@@ -10,6 +10,7 @@ generator/data/
 generator/*.log
 backend/*.log
 generator/.venv-unirig/
+generator/.venv-scan/
 
 # Firebase: CLI cache, emulator logs, and keys (a service account key gives full access to the project)
 firebase/.firebase/

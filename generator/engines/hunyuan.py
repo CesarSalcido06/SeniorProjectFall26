@@ -32,9 +32,9 @@ class HunyuanEngine:
 
     @property
     def loaded(self) -> bool:
-        return self._paint is not None
+        return self._shape is not None
 
-    def load(self, multiview: bool = False) -> None:
+    def load(self, multiview: bool = False, paint: bool = True) -> None:
         from hy3dgen.shapegen import DegenerateFaceRemover, FaceReducer, FloaterRemover, Hunyuan3DDiTFlowMatchingPipeline
         from hy3dgen.texgen import Hunyuan3DPaintPipeline
 
@@ -49,11 +49,12 @@ class HunyuanEngine:
             )
             shape.enable_flashvdm(topk_mode="merge")
             self._shape, self._shape_kind = shape, kind
-        if self._paint is None:
-            paint = Hunyuan3DPaintPipeline.from_pretrained(PAINT_REPO, subfolder=PAINT_SUBFOLDER)
-            paint.enable_model_cpu_offload()  # without this, shape + paint don't fit in 12 GB
-            self._paint = paint
+        if self._cleanup is None:
             self._cleanup = (FloaterRemover(), DegenerateFaceRemover(), FaceReducer())
+        if paint and self._paint is None:
+            pipeline = Hunyuan3DPaintPipeline.from_pretrained(PAINT_REPO, subfolder=PAINT_SUBFOLDER)
+            pipeline.enable_model_cpu_offload()  # without this, shape + paint don't fit in 12 GB
+            self._paint = pipeline
 
     def unload(self) -> None:
         self._shape = self._shape_kind = self._paint = self._cleanup = None
@@ -62,7 +63,7 @@ class HunyuanEngine:
     def generate(self, images: dict, texture: bool, progress) -> "trimesh.Trimesh":
         """images: {"front": RGBA PIL image, optionally "left"/"back"/"right"}, backgrounds already removed."""
         multiview = len(images) > 1
-        self.load(multiview)
+        self.load(multiview, paint=texture)  # scan gap filling only wants the shape
         progress(10, "shape (multi-view)" if multiview else "shape")
         mesh = self._shape(
             image=images if multiview else images["front"],

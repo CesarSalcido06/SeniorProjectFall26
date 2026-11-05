@@ -261,3 +261,71 @@ def test_generator_setting_validated(monkeypatch):
     monkeypatch.setenv("GENERATOR", "blender")
     with pytest.raises(ValueError):
         Settings()
+
+
+def start_scan_with_photos(client, photos=8, longest_mm="62.5"):
+    job = client.post("/api/scans").json()
+    assert job["status"] == "uploading"
+    for _ in range(photos):
+        res = client.post(f"/api/scans/{job['id']}/photos", files={"photo": ("p.jpg", photo_bytes(), "image/jpeg")})
+        assert res.status_code == 201
+    return job["id"], client.post(f"/api/scans/{job['id']}/start", data={"longest_mm": longest_mm})
+
+
+def test_scan_end_to_end(client):
+    job_id, res = start_scan_with_photos(client)
+    assert res.status_code == 200
+    job = wait_done(client, job_id)
+    assert job["status"] == "done" and job["mode"] == "scan"
+    assert "model.glb" in job["files"]
+    assert sum(1 for i in job["files"].values() if i["kind"] == "photo") == 8
+    assert job["scan"]["longest_mm"] == 62.5
+    assert job["scan"]["report"]["size_mm"][0] == 62.5
+
+
+def test_scan_ai_help_is_on_by_default_and_reports_sources(client):
+    job_id, res = start_scan_with_photos(client)
+    assert res.status_code == 200
+    job = wait_done(client, job_id)
+    assert job["scan"]["ai_depth"] is True and job["scan"]["ai_fill"] is True
+    assert job["scan"]["report"]["surface_pct"]["ai_fill"] > 0
+    assert job["files"]["model_sources.glb"]["kind"] == "scan_view"
+    assert job["files"]["model_measured.glb"]["kind"] == "scan_view"
+
+
+def test_scan_ai_help_can_be_turned_off(client):
+    job = client.post("/api/scans").json()
+    for _ in range(8):
+        client.post(f"/api/scans/{job['id']}/photos", files={"photo": ("p.jpg", photo_bytes(), "image/jpeg")})
+    res = client.post(f"/api/scans/{job['id']}/start", data={"longest_mm": "62.5", "ai_depth": "false", "ai_fill": "false"})
+    assert res.status_code == 200
+    done = wait_done(client, job["id"])
+    assert done["scan"]["ai_depth"] is False and done["scan"]["ai_fill"] is False
+    assert done["scan"]["report"]["surface_pct"]["measured"] == 100
+    assert "model_sources.glb" not in done["files"]
+
+
+def test_scan_needs_enough_photos(client):
+    job_id, res = start_scan_with_photos(client, photos=3)
+    assert res.status_code == 422
+    assert client.get(f"/api/jobs/{job_id}").json()["status"] == "uploading"
+
+
+def test_scan_rejects_photos_after_start_and_bad_files(client):
+    job_id, _ = start_scan_with_photos(client)
+    late = client.post(f"/api/scans/{job_id}/photos", files={"photo": ("p.jpg", photo_bytes(), "image/jpeg")})
+    assert late.status_code == 409
+    other = client.post("/api/scans").json()["id"]
+    bad = client.post(f"/api/scans/{other}/photos", files={"photo": ("p.jpg", b"not a photo", "image/jpeg")})
+    assert bad.status_code == 422
+
+
+def test_scan_flags_blurry_photos_without_rejecting(client):
+    job = client.post("/api/scans").json()
+    res = client.post(f"/api/scans/{job['id']}/photos", files={"photo": ("p.jpg", photo_bytes(blur=8), "image/jpeg")})
+    assert res.status_code == 201 and res.json()["blurry"] is True
+
+
+def test_unfinished_scan_can_be_discarded(client):
+    job = client.post("/api/scans").json()
+    assert client.delete(f"/api/jobs/{job['id']}").status_code == 204

@@ -5,6 +5,7 @@ Run from generator/: .venv/bin/uvicorn server:app --host 127.0.0.1 --port 8100
 """
 import base64
 import io
+import json
 import os
 import queue
 import subprocess
@@ -14,7 +15,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
@@ -30,7 +31,7 @@ GPU_RELEASE_CMD = os.getenv("GPU_RELEASE_CMD", "")
 IDLE_SECONDS = float(os.getenv("GPU_IDLE_SECONDS", "120"))
 
 
-from engines import unirig  # noqa: E402
+from engines import scan, unirig  # noqa: E402
 
 
 def make_engine(name: str):
@@ -107,6 +108,20 @@ class Generator:
         self._queue.put(task_id)
         return task_id
 
+    def submit_scan(self, photos: list[bytes], longest_mm: float | None, ai_depth: bool = True, ai_fill: bool = True) -> str:
+        task_id = uuid.uuid4().hex[:12]
+        photo_dir = DATA_DIR / task_id / "photos"
+        photo_dir.mkdir(parents=True, exist_ok=True)
+        for index, data in enumerate(photos):
+            (photo_dir / f"{index:04d}.jpg").write_bytes(data)
+        self.tasks[task_id] = {
+            "id": task_id, "kind": "scan", "status": "PENDING", "progress": 0, "stage": "queued",
+            "engine": "colmap", "longest_mm": longest_mm, "ai_depth": ai_depth, "ai_fill": ai_fill, "files": [], "report": None, "error": None,
+            "created_at": time.time(), "seconds": None,
+        }
+        self._queue.put(task_id)
+        return task_id
+
     def _set(self, task_id: str, **fields) -> None:
         self.tasks[task_id].update(fields)
 
@@ -136,16 +151,80 @@ class Generator:
                 continue
             try:
                 self._run(task_id)
+            except scan.ScanError as exc:
+                self._set(task_id, status="FAILED", error=str(exc))  # already written for the user
             except Exception as exc:
                 traceback.print_exc()
                 self._set(task_id, status="FAILED", error=f"{type(exc).__name__}: {exc}")
             self._last_used = time.monotonic()
 
     def _run(self, task_id: str) -> None:
-        if self.tasks[task_id]["kind"] == "rig":
+        kind = self.tasks[task_id]["kind"]
+        if kind == "rig":
             self._run_rig(task_id)
+        elif kind == "scan":
+            self._run_scan(task_id)
         else:
             self._run_generate(task_id)
+
+    def _run_scan(self, task_id: str) -> None:
+        task = self.tasks[task_id]
+        task_dir = DATA_DIR / task_id
+        started = time.monotonic()
+        self._set(task_id, status="IN_PROGRESS", progress=1, stage="starting")
+        self._acquire_gpu()
+        # COLMAP runs in its own process and needs the VRAM the generator's models hold
+        self.engine.unload()
+
+        # The gap fill takes the last stretch of the progress bar, if it's on
+        share = 0.9 if task["ai_fill"] else 1.0
+
+        def progress(pct: int, stage: str) -> None:
+            self._set(task_id, progress=int(pct * share), stage=stage)
+
+        work = task_dir / "work"
+        report = scan.run(task_dir / "photos", work, task["longest_mm"], task["ai_depth"], progress)
+        if task["ai_fill"]:
+            report = self._fill_scan_gaps(task_id, work, report)
+
+        (task_dir / "model.glb").write_bytes((work / "model.glb").read_bytes())
+        files = ["model.glb"]
+        for extra in ("model_measured.glb", "model_sources.glb"):
+            if (work / extra).exists():
+                (task_dir / extra).write_bytes((work / extra).read_bytes())
+                files.append(extra)
+        if unirig.available():
+            try:
+                unirig.to_fbx(task_dir / "model.glb", task_dir / "model.fbx", task_dir / "export.log")
+                files.append("model.fbx")
+            except unirig.StepFailed:
+                traceback.print_exc()  # GLB is enough to finish the task
+        self._set(
+            task_id, status="SUCCEEDED", progress=100, stage="done", files=files, report=report,
+            seconds=round(time.monotonic() - started, 1),
+        )
+
+    def _fill_scan_gaps(self, task_id: str, work: Path, report: dict) -> dict:
+        """Patches what the scan missed. A failure here can't cost the user their scan, so it only adds a warning."""
+        try:
+            self._set(task_id, progress=90, stage="AI model for the gaps")
+            photos = scan.pick_fill_photos(work)
+            if self._rembg is None:
+                from hy3dgen.rembg import BackgroundRemover
+
+                self._rembg = BackgroundRemover()
+            cutouts = {view: self._rembg(Image.open(path).convert("RGB")) for view, path in photos.items()}
+            mesh = self.engine.generate(cutouts, texture=False, progress=lambda pct, stage: None)
+            mesh.export(work / "ai.glb")
+            self.engine.unload()  # the merge doesn't need the GPU, but nothing else should wait on these models
+            self._set(task_id, progress=96, stage="filling gaps")
+            return scan.fill_gaps(work, work / "ai.glb")
+        except Exception as exc:
+            traceback.print_exc()
+            self.engine.unload()
+            report["warnings"].append(f"The AI gap fill didn't run, so unseen areas are still missing ({type(exc).__name__}).")
+            (work / "report.json").write_text(json.dumps(report, indent=2))
+            return report
 
     def _run_rig(self, task_id: str) -> None:
         task = self.tasks[task_id]
@@ -216,6 +295,16 @@ def health():
 @app.post("/tasks", status_code=201)
 def create_task(req: TaskRequest):
     return {"result": gen.submit(req)}
+
+
+@app.post("/scans", status_code=201)
+async def create_scan(
+    photos: list[UploadFile] = File(...), longest_mm: float | None = Form(None),
+    ai_depth: bool = Form(True), ai_fill: bool = Form(True),
+):
+    if not scan.available():
+        raise HTTPException(501, "Photogrammetry isn't installed (see generator/README.md)")
+    return {"result": gen.submit_scan([await photo.read() for photo in photos], longest_mm, ai_depth, ai_fill)}
 
 
 @app.post("/tasks/{task_id}/rig", status_code=201)

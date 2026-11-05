@@ -177,6 +177,30 @@ class MockMeshy:
             state["thumbnail_url"] = f"mock://{c}/thumbnail.png"
         return state
 
+    async def create_scan(self, photos: list, longest_mm: float | None, ai_depth: bool = True, ai_fill: bool = True) -> str:
+        task_id = "mock-scan-" + uuid.uuid4().hex[:8]
+        self._tasks[task_id] = {
+            "started": time.monotonic(), "category": "prop", "longest_mm": longest_mm, "ai_depth": ai_depth, "ai_fill": ai_fill,
+        }
+        return task_id
+
+    async def get_scan(self, task_id: str) -> dict:
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise MeshyError(f"Unknown mock task {task_id}")
+        state = {**self._progress(task), "kind": "scan", "stage": "pretending"}
+        if state["status"] == "SUCCEEDED":
+            longest = task["longest_mm"]
+            state["model_urls"] = {"glb": "mock://prop/model.glb"}
+            state["report"] = {
+                "photos_uploaded": 8, "photos_used": 8, "size_mm": [longest, longest, longest] if longest else None,
+                "proportions": [1, 1, 1], "warnings": [],
+                "surface_pct": {"measured": 100 if not task["ai_fill"] else 70, "ai_depth": 0, "ai_fill": 0 if not task["ai_fill"] else 30, "smoothed": 0},
+            }
+            if task["ai_depth"] or task["ai_fill"]:
+                state["extra_models"] = {"model_sources.glb": "mock://prop/model.glb", "model_measured.glb": "mock://prop/model.glb"}
+        return state
+
     async def create_rigging(self, input_task_id: str, height_meters: float = 1.7) -> str:
         task_id = "mock-rig-" + uuid.uuid4().hex[:8]
         self._tasks[task_id] = {"started": time.monotonic(), "category": "character"}
@@ -243,6 +267,30 @@ class LocalGeneratorClient:
             files = self._files(task_id, task)
             task["model_urls"] = {fmt: files[f"model.{fmt}"] for fmt in ("glb", "fbx") if f"model.{fmt}" in files}
             task["thumbnail_url"] = files.get("cutout.png")
+        if task.get("error"):
+            task["task_error"] = {"message": task["error"]}
+        return task
+
+    async def create_scan(self, photos: list, longest_mm: float | None, ai_depth: bool = True, ai_fill: bool = True) -> str:
+        """photos: paths of the JPEGs on disk. Sent as a form, since dozens of photos are too big for JSON."""
+        files = [("photos", (path.name, path.read_bytes(), "image/jpeg")) for path in photos]
+        data = {"ai_depth": str(ai_depth).lower(), "ai_fill": str(ai_fill).lower()}
+        if longest_mm:
+            data["longest_mm"] = str(longest_mm)
+        try:
+            resp = await self._client.post("/scans", files=files, data=data, timeout=300)
+        except httpx.TransportError as exc:
+            raise MeshyError(f"Local generator unreachable at {self.base_url} ({type(exc).__name__}). Is it running?")
+        if resp.status_code >= 400:
+            raise MeshyError(f"Local generator refused the scan: HTTP {resp.status_code} {resp.text[:200]}")
+        return resp.json()["result"]
+
+    async def get_scan(self, task_id: str) -> dict:
+        task = await self._get(f"/tasks/{task_id}")
+        if task["status"] == "SUCCEEDED":
+            files = self._files(task_id, task)
+            task["model_urls"] = {fmt: files[f"model.{fmt}"] for fmt in ("glb", "fbx") if f"model.{fmt}" in files}
+            task["extra_models"] = {name: files[name] for name in ("model_sources.glb", "model_measured.glb") if name in files}
         if task.get("error"):
             task["task_error"] = {"message": task["error"]}
         return task

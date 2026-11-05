@@ -25,11 +25,13 @@ def measure(img: Image.Image) -> dict:
     return {"sharpness": round(sharpness, 1), "brightness": round(brightness, 1)}
 
 
-def process_photo(data: bytes, settings, force: bool = False) -> tuple[bytes, dict]:
+def process_photo(data: bytes, settings, force: bool = False, max_side: int | None = None,
+                  jpeg_quality: int = 90) -> tuple[bytes, dict]:
     """Returns (normalized JPEG bytes, quality report). Raises PhotoRejected.
 
     force=True skips the blur/lighting checks (handy for testing odd photos) but never
     lets through files that aren't images or are too small.
+    Scans pass a bigger max_side and quality, since their measurements come straight from the pixels.
     """
     if len(data) > settings.max_upload_mb * 1024 * 1024:
         raise PhotoRejected(f"Photo is larger than {settings.max_upload_mb:g} MB.")
@@ -61,8 +63,9 @@ def process_photo(data: bytes, settings, force: bool = False) -> tuple[bytes, di
         if quality["brightness"] > settings.bright_threshold:
             raise PhotoRejected("Photo is overexposed. Avoid direct light behind or on the object.", quality)
 
-    img.thumbnail((settings.max_side, settings.max_side), Image.LANCZOS)
+    side = max_side or settings.max_side
+    img.thumbnail((side, side), Image.LANCZOS)
     out = io.BytesIO()
-    img.save(out, "JPEG", quality=90)  # re-encoding also drops EXIF (GPS location etc.)
+    img.save(out, "JPEG", quality=jpeg_quality)  # re-encoding also drops EXIF (GPS location etc.)
     quality["normalized_width"], quality["normalized_height"] = img.size
     return out.getvalue(), quality

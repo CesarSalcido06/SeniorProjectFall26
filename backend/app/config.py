@@ -55,6 +55,11 @@ class Settings:
         self.dark_threshold = float(os.getenv("DARK_THRESHOLD", "30"))
         self.bright_threshold = float(os.getenv("BRIGHT_THRESHOLD", "235"))
 
+        # Photogrammetry scans
+        self.scan_max_side = int(os.getenv("SCAN_MAX_SIDE", "3200"))
+        self.scan_min_photos = int(os.getenv("SCAN_MIN_PHOTOS", "8"))
+        self.scan_max_photos = int(os.getenv("SCAN_MAX_PHOTOS", "120"))
+
         self.max_concurrent_jobs = int(os.getenv("MAX_CONCURRENT_JOBS", "2"))
 
         # Firebase link (firebase_sync.py). Off unless FIREBASE_PROJECT_ID is set.

@@ -42,6 +42,18 @@ The views are a quarter turn apart around the object, named from the **object's*
 (like stage left): `left` is the object's left side, so the photographer steps to *their* right.
 Keep the same distance and height for every shot, and don't move the object between shots.
 
+### Scans — several photos, measured with photogrammetry
+1. `POST /api/scans` opens a scan and returns a job with `status: "uploading"`.
+2. `POST /api/scans/{id}/photos` (form field `photo`) adds one photo. Returns `{"name", "count", "blurry"}`. Blurry photos are flagged, not refused.
+3. `POST /api/scans/{id}/start` starts it. Form fields, all optional:
+   - `longest_mm`: the piece's longest side, which sets the real size
+   - `ai_depth` (default `true`): estimates plain faces the scan can't measure
+   - `ai_fill` (default `true`): patches unseen areas like the underside from an AI model
+
+A finished job has `scan.report`, including `size_mm` (from measured points only), `surface_pct` (`measured`, `ai_depth`, `ai_fill`, `smoothed`), `ai_depth_check_mm`, `ai_fill_fit_mm` and `warnings`.
+
+Files with `kind: "model"` are the model to import. Files with `kind: "scan_view"` are for looking at it, not importing: `model_sources.glb` (colored by source) and `model_measured.glb` (measured points only).
+
 ### `GET /api/jobs?status=done&limit=100` — list jobs (newest first)
 ### `GET /api/jobs/{id}` — one job
 ### `GET /api/jobs/{id}/files/{name}` — download a file (names come from the job's `files`)

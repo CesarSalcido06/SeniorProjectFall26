@@ -76,6 +76,35 @@ The first task stops BenchAI, and BenchAI restarts 2 minutes after the last task
 the MegaMan classifier is unavailable, so jobs uploaded as "auto" during that window fall back to prop
 (the job's `classifier_note` says so). Pick the category by hand when uploading a batch.
 
+## Accurate scans (photogrammetry plus AI help)
+
+`POST /scans` takes 8+ photos and builds a model with COLMAP (`tools/scan_pipeline.py`, environment `.venv-scan`).
+Every surface point remembers where it came from:
+
+| Source | How it's made | Turn off with |
+|---|---|---|
+| Measured | Triangulated from the photos by COLMAP | can't be turned off |
+| AI depth | Depth Anything V2 Small (`tools/scan_depth_model.py`, downloads about 100 MB on first use), fitted per photo to measured points and kept only where several photos agree (`tools/scan_depth_help.py`). Fills plain faces. | `ai_depth=false` |
+| AI fill | Hunyuan3D-2mv model made from 4 of the photos, lined up with the scan, used only in holes (`tools/scan_fill.py`). Fills unseen areas like the underside. | `ai_fill=false` |
+
+What protects the measurements:
+- The model's size only ever comes from measured points, and nothing can stick out past the box they span.
+- The gap fill never remeshes the scan's surface. It adds patches and only moves the patches to close the seam.
+- A photo whose depth fit misses hidden measured points by too much is dropped. Too few photos left means no AI depth.
+- AI fill is rejected if the two shapes don't line up, and it skips spots the cameras saw straight past (like a through-hole).
+- If an AI step fails, the scan still finishes with a warning.
+
+Each scan's files: `model.glb`, `model.fbx`, `model_measured.glb` (measured points only) and `model_sources.glb` (colored
+blue measured, orange AI depth, pink AI fill, grey smoothed over by the mesher). `report.surface_pct` gives the split.
+
+Test against a part of known size, using rendered photos:
+
+```bash
+.venv-unirig/bin/python tools/scan_test_render.py /tmp/part --surface speckled   # or plain
+.venv-scan/bin/python tools/scan_pipeline.py /tmp/part/photos /tmp/run --longest-mm 60 --ai-python .venv/bin/python
+.venv-scan/bin/python tools/scan_test_compare.py /tmp/run/model.glb /tmp/part/truth.npz /tmp/run/model_sources.glb
+```
+
 ## Checking models with Autodesk's FBX SDK
 
 `tools/check_fbx.py` opens FBX files with Autodesk's own FBX SDK (the library Maya and 3ds Max use) and

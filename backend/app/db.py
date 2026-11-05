@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 # queued -> classifying -> generating -> rigging (characters only) -> downloading -> done | failed
+# Scans start as "uploading" (photos arrive one at a time), then: queued -> generating -> downloading -> done | failed
 ACTIVE_STATUSES = ("queued", "classifying", "generating", "rigging", "downloading")
 
 _SCHEMA = """
@@ -33,7 +34,9 @@ CREATE TABLE IF NOT EXISTS jobs (
 )
 """
 
-_JSON_FIELDS = ("quality", "files")
+_JSON_FIELDS = ("quality", "files", "scan")
+# Added after the first version; older databases get them on startup
+_ADDED_COLUMNS = {"mode": "TEXT NOT NULL DEFAULT 'generate'", "stage": "TEXT", "scan": "TEXT"}
 
 
 class JobStore:
@@ -46,6 +49,10 @@ class JobStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.execute(_SCHEMA)
+            existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(jobs)")}
+            for column, definition in _ADDED_COLUMNS.items():
+                if column not in existing:
+                    self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {definition}")
             self._conn.commit()
 
     def _row(self, row: Optional[sqlite3.Row]) -> Optional[dict]:
@@ -54,6 +61,20 @@ class JobStore:
         job = dict(row)
         for field in _JSON_FIELDS:
             job[field] = json.loads(job[field]) if job[field] else ({} if field == "files" else None)
+        return job
+
+    def create_scan(self, longest_mm: Optional[float]) -> dict:
+        now = time.time()
+        job_id = uuid.uuid4().hex[:12]
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO jobs (id, created_at, updated_at, status, requested_category, category, category_source,"
+                " original_name, mode, scan) VALUES (?, ?, ?, 'uploading', 'prop', 'prop', 'user', 'scan', 'scan', ?)",
+                (job_id, now, now, json.dumps({"longest_mm": longest_mm})),
+            )
+            self._conn.commit()
+        job = self.get(job_id)
+        self._notify(job_id, job)
         return job
 
     def _notify(self, job_id: str, job: Optional[dict]) -> None:

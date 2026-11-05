@@ -16,6 +16,7 @@ def view_photo_name(view: str) -> str:
     return PHOTO_NAME if view == "front" else f"photo_{view}.jpg"
 
 TASK_TIMEOUT_SECONDS = 20 * 60
+SCAN_TIMEOUT_SECONDS = 70 * 60  # the generator's own limit is an hour
 
 # Meshy result key -> (our file name, kind). Kinds let the desktop hub pick what to import.
 _MODEL_FILES = {"glb": ("model.glb", "model"), "fbx": ("model.fbx", "model")}
@@ -69,6 +70,9 @@ class Worker:
     async def _process(self, job_id: str) -> None:
         job = self.store.get(job_id)
         if job is None:
+            return
+        if job["mode"] == "scan":
+            await self._process_scan(job)
             return
         job_dir = self.settings.job_dir(job_id)
         photo = (job_dir / PHOTO_NAME).read_bytes()
@@ -132,19 +136,53 @@ class Worker:
 
         self.store.update(job_id, status="done", progress=100, files=files, error=None)
 
-    async def _wait(self, job_id, fetch, task_id: str, progress_span: tuple[int, int]) -> dict:
+    async def _process_scan(self, job: dict) -> None:
+        job_id = job["id"]
+        job_dir = self.settings.job_dir(job_id)
+        settings = job["scan"] or {}
+        task_id = job["meshy_task_id"]
+        if not task_id:
+            photos = sorted(job_dir / name for name, info in job["files"].items() if info.get("view") == "scan")
+            task_id = await self.meshy.create_scan(
+                photos, settings.get("longest_mm"), settings.get("ai_depth", True), settings.get("ai_fill", True),
+            )
+            self.store.update(job_id, meshy_task_id=task_id)
+        self.store.update(job_id, status="generating")
+        task = await self._wait(
+            job_id, self.meshy.get_scan, task_id, progress_span=(0, 95), timeout=SCAN_TIMEOUT_SECONDS
+        )
+
+        self.store.update(job_id, status="downloading", progress=95, stage="saving")
+        files = {name: info for name, info in job["files"].items() if info["kind"] == "photo"}
+        for fmt, url in (task.get("model_urls") or {}).items():
+            name = f"model.{fmt}"
+            data = await self.meshy.download(url)
+            (job_dir / name).write_bytes(data)
+            files[name] = {"kind": "model", "size": len(data)}
+        # Same model shown differently: what was measured, and only the measured part. Kept apart from the real model.
+        for name, url in (task.get("extra_models") or {}).items():
+            data = await self.meshy.download(url)
+            (job_dir / name).write_bytes(data)
+            files[name] = {"kind": "scan_view", "size": len(data)}
+        self.store.update(
+            job_id, status="done", progress=100, stage=None, files=files, error=None,
+            scan={**settings, "report": task.get("report")},
+        )
+
+    async def _wait(self, job_id, fetch, task_id: str, progress_span: tuple[int, int],
+                    timeout: int = TASK_TIMEOUT_SECONDS) -> dict:
         start, end = progress_span
-        deadline = time.monotonic() + TASK_TIMEOUT_SECONDS
+        deadline = time.monotonic() + timeout
         while True:
             task = await fetch(task_id)
             status = task.get("status")
             pct = int(task.get("progress") or 0)
-            self.store.update(job_id, progress=start + (end - start) * pct // 100)
+            self.store.update(job_id, progress=start + (end - start) * pct // 100, stage=task.get("stage"))
             if status == "SUCCEEDED":
                 return task
             if status in ("FAILED", "CANCELED"):
                 message = (task.get("task_error") or {}).get("message") or status.lower()
-                raise MeshyError(f"Task {task_id} {status.lower()}: {message}")
+                raise MeshyError(message if task.get("kind") == "scan" else f"Task {task_id} {status.lower()}: {message}")
             if time.monotonic() > deadline:
-                raise MeshyError(f"Task {task_id} timed out after {TASK_TIMEOUT_SECONDS // 60} minutes")
+                raise MeshyError(f"Task {task_id} timed out after {timeout // 60} minutes")
             await asyncio.sleep(self.settings.meshy_poll_seconds)

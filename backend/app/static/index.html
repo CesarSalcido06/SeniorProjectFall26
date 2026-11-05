@@ -2,103 +2,376 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Photo-to-Asset Test Console</title>
-  <!-- Test GUI only: the real phone app and desktop hub replace this -->
-  <script type="module" src="https://unpkg.com/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#11141a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Photo to Asset</title>
+  <!-- Test tool for phones. Daniel's desktop hub is the real interface for picking and importing assets. -->
   <style>
-    :root { --bg: #f4f5f7; --card: #fff; --text: #1d2330; --muted: #667085; --line: #d9dde5; --accent: #2563eb; --bad: #c0362c; --good: #15803d; }
+    :root { --bg: #f4f5f7; --card: #fff; --text: #1d2330; --muted: #667085; --line: #d9dde5; --accent: #2563eb; --on-accent: #fff; --bad: #c0362c; --good: #15803d; --warn: #b45309; }
     @media (prefers-color-scheme: dark) {
-      :root { --bg: #11141a; --card: #1a1f28; --text: #e6e9ef; --muted: #98a2b3; --line: #2c3340; --accent: #6b9cff; --bad: #ff7b70; --good: #4ade80; }
+      :root { --bg: #11141a; --card: #1a1f28; --text: #e6e9ef; --muted: #98a2b3; --line: #2c3340; --accent: #6b9cff; --on-accent: #0b1220; --bad: #ff7b70; --good: #4ade80; --warn: #fbbf24; }
     }
-    * { box-sizing: border-box; }
-    body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
-    main { max-width: 720px; margin: 0 auto; padding: 16px; }
-    h1 { font-size: 20px; margin: 4px 0 2px; }
-    .muted { color: var(--muted); font-size: 13px; }
-    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-top: 14px; }
-    label { display: block; font-weight: 600; margin: 10px 0 6px; }
-    input[type=file], select { width: 100%; font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
-    .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
-    button { font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 8px; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
-    button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: 6px 10px; font-size: 13px; }
-    button:disabled { opacity: .5; cursor: default; }
-    details { margin-top: 12px; }
-    summary { cursor: pointer; font-weight: 600; }
-    .views label { font-weight: 400; }
-    .views input { margin-top: 4px; }
-    #preview { max-width: 100%; max-height: 240px; border-radius: 8px; margin-top: 10px; display: none; }
-    #msg { margin-top: 10px; min-height: 1.4em; }
-    .bad { color: var(--bad); } .good { color: var(--good); }
-    .job { display: grid; grid-template-columns: 72px 1fr; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
-    .job:first-child { border-top: 0; }
-    .job img { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; background: var(--bg); }
-    .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin: 6px 0; }
-    .bar div { height: 100%; background: var(--accent); transition: width .4s; }
-    .files a { margin-right: 10px; font-size: 13px; color: var(--accent); }
-    model-viewer { width: 100%; height: 280px; background: var(--bg); border-radius: 8px; margin-top: 8px; }
-    code { font-size: 12px; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html { -webkit-text-size-adjust: 100%; }
+    body { margin: 0; font: 16px/1.45 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 640px; margin: 0 auto; padding: 12px 16px calc(32px + env(safe-area-inset-bottom)); }
+    h1 { font-size: 20px; margin: 4px 0 10px; }
+    .muted { color: var(--muted); font-size: 14px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-top: 12px; }
+
+    .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 12px; background: var(--line); }
+    .tabs button { min-height: 44px; border-radius: 9px; background: transparent; color: var(--text); font-weight: 600; }
+    .tabs button[aria-selected=true] { background: var(--card); }
+
+    button, .button { font: inherit; font-weight: 600; min-height: 48px; padding: 10px 16px; border-radius: 11px; border: 0; background: var(--accent); color: var(--on-accent); cursor: pointer; display: flex; align-items: center; justify-content: center; text-align: center; touch-action: manipulation; }
+    button:disabled { opacity: .45; }
+    .ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+    .small { min-height: 40px; padding: 6px 12px; font-size: 14px; }
+    .danger { color: var(--bad); }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+    .actions .button { padding: 10px 6px; }
+    .wide { width: 100%; margin-top: 12px; }
+    /* The real file inputs stay hidden; their labels are the buttons */
+    .file { position: absolute; width: 1px; height: 1px; opacity: 0; }
+
+    label.field { display: block; font-weight: 600; margin-top: 14px; }
+    /* 16px stops iPhones zooming the page when a field is tapped */
+    input[type=number], select { width: 100%; min-height: 48px; font: inherit; font-size: 16px; padding: 10px; margin-top: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); }
+    .check { display: flex; gap: 10px; align-items: center; min-height: 44px; margin-top: 6px; }
+    .check input { width: 22px; height: 22px; }
+
+    details { margin-top: 2px; }
+    summary { cursor: pointer; font-weight: 600; min-height: 32px; }
+    .tips { margin: 8px 0 0; padding-left: 20px; }
+    .tips li { margin-bottom: 7px; }
+
+    .shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; margin-top: 12px; }
+    .shot { position: relative; aspect-ratio: 1; border-radius: 8px; overflow: hidden; background: var(--bg); }
+    .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .shot.busy img { opacity: .4; }
+    .shot.failed { outline: 2px solid var(--bad); }
+    .shot.blurry { outline: 2px solid var(--warn); }
+    .shot span { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; font-weight: 600; text-align: center; color: #fff; background: rgba(0, 0, 0, .65); }
+
+    .meter { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: 10px; }
+    .meter div { height: 100%; background: var(--accent); transition: width .4s; }
+    .meter.ok div { background: var(--good); }
+    #scanMsg, #aiMsg { margin-top: 10px; min-height: 1.4em; font-size: 15px; }
+    .sources { display: flex; height: 10px; border-radius: 5px; overflow: hidden; margin-top: 10px; background: #8884; }
+    .sources span { display: block; height: 100%; }
+    .source-key { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; font-size: 13px; }
+    .source-key i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+    .src-measured { background: #2f80ed; }
+    .src-depth { background: #f59e0b; }
+    .src-fill { background: #db2777; }
+    .src-smooth { background: #969696; }
+    .bad { color: var(--bad); } .good { color: var(--good); } .warn { color: var(--warn); }
+
+    .job { padding: 14px 0; border-top: 1px solid var(--line); }
+    .job:first-child { border-top: 0; padding-top: 4px; }
+    .job-head { display: grid; grid-template-columns: 64px 1fr; gap: 12px; align-items: start; }
+    .job-head img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; background: var(--bg); display: block; }
+    .size { font-size: 20px; font-weight: 700; margin-top: 8px; font-variant-numeric: tabular-nums; }
+    .report { margin-top: 4px; }
+    .warnings { margin: 8px 0 0; padding-left: 20px; color: var(--warn); font-size: 14px; }
+    .job-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .job-actions a { text-decoration: none; }
+    model-viewer { width: 100%; height: 340px; background: var(--bg); border-radius: 10px; margin-top: 10px; display: block; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
 <main>
-  <h1>Photo-to-Asset Test Console</h1>
-  <div class="muted" id="mode">Loading config…</div>
+  <h1>Photo to Asset</h1>
+  <div class="tabs" role="tablist">
+    <button id="tabScan" role="tab" aria-selected="true">Accurate scan</button>
+    <button id="tabAi" role="tab" aria-selected="false">AI model</button>
+  </div>
 
-  <form class="card" id="form">
-    <label for="photo">Front photo</label>
-    <input id="photo" name="photo" type="file" accept="image/*" capture="environment" required>
-    <img id="preview" alt="Selected photo">
-    <details id="angles">
-      <summary>More angles (optional, better shape)</summary>
-      <div class="muted">Keep the object still and the same distance away. Walk around it a quarter turn at a time.
-        The local generator uses these; Meshy and the mock only use the front photo.</div>
-      <div class="views">
-        <label>Left side <span class="muted">(the object's left: step to your right)</span>
-          <input name="left" type="file" accept="image/*" capture="environment"></label>
-        <label>Back
-          <input name="back" type="file" accept="image/*" capture="environment"></label>
-        <label>Right side <span class="muted">(the object's right: step to your left)</span>
-          <input name="right" type="file" accept="image/*" capture="environment"></label>
-      </div>
-    </details>
-    <label for="category">Category</label>
-    <select id="category" name="category">
-      <option value="auto">Auto (let the classifier decide)</option>
-      <option value="prop">Prop (static object, no rig)</option>
-      <option value="character">Character (humanoid, gets rigged)</option>
-      <option value="creature">Creature (animal/monster)</option>
-    </select>
-    <div class="row">
-      <input id="force" name="force" type="checkbox" value="true">
-      <label for="force" style="margin:0;font-weight:400">Skip blur/lighting check</label>
+  <section id="paneScan">
+    <div class="card">
+      <details id="tips">
+        <summary>How to shoot it (read this first)</summary>
+        <ol class="tips">
+          <li><b>Put it on newspaper or printed text.</b> A patterned sheet lets the software work out where the phone was.</li>
+          <li><b>Shiny or plain plastic? Dust it first.</b> Dry shampoo, talc, or foot powder, thin and even. Shine and blank color can't be measured.</li>
+          <li><b>Bright, soft light, no flash.</b> Near a window or under a ceiling light works. Avoid hard shadows.</li>
+          <li><b>Move the phone, never the piece.</b> Don't touch or bump the sheet between shots.</li>
+          <li><b>Take 30 to 50 photos in 3 circles:</b> low, middle, and high, a small step between shots. Each one should overlap the last by about two thirds.</li>
+          <li><b>Fill about a third of the frame.</b> Hold still and tap the piece to focus. Keep the same zoom the whole time, and don't use the ultra-wide lens.</li>
+          <li><b>Measure the longest side</b> with a ruler or calipers. That one number sets the real size of the whole model.</li>
+        </ol>
+        <div class="muted" style="margin-top:8px">The bottom touching the sheet can't be seen. With AI gap fill on, it gets filled in and marked as not measured. Otherwise it stays open.</div>
+      </details>
     </div>
-    <div class="row"><button id="submit">Upload &amp; generate</button></div>
-    <div id="msg" role="status"></div>
-  </form>
+
+    <div class="card">
+      <strong id="scanCount">0 photos</strong>
+      <span class="muted" id="scanNeed"></span>
+      <div class="meter"><div id="scanBar" style="width:0"></div></div>
+      <div class="actions">
+        <label class="button" for="shoot">Take photo</label>
+        <label class="button ghost" for="library">Choose photos</label>
+      </div>
+      <input class="file" id="shoot" type="file" accept="image/*" capture="environment">
+      <input class="file" id="library" type="file" accept="image/*" multiple>
+      <div class="shots" id="shots"></div>
+
+      <label class="field" for="longest">Longest side (mm)
+        <input id="longest" type="number" inputmode="decimal" min="0" step="0.1" placeholder="e.g. 62.5">
+      </label>
+      <div class="muted">Leave blank if you have no ruler: you'll get the right shape and proportions, but no real size.</div>
+
+      <label class="check"><input id="aiDepth" type="checkbox" checked> AI help on plain faces <span class="muted">(estimates what the scan can't measure)</span></label>
+      <label class="check"><input id="aiFill" type="checkbox" checked> AI gap fill <span class="muted">(completes unseen areas like the underside; adds about 2 min)</span></label>
+      <div class="muted">The real size always comes from measured points. Estimated areas are colored in the result, so you can tell them apart.</div>
+
+      <button id="startScan" class="wide" disabled>Start scan</button>
+      <button id="discardScan" class="wide ghost small danger" hidden>Discard these photos</button>
+      <div id="scanMsg" role="status"></div>
+    </div>
+  </section>
+
+  <section id="paneAi" hidden>
+    <form class="card" id="form">
+      <div class="muted">Hunyuan3D guesses a full model from 1 to 4 photos. It's quick and looks good, but the shape and size are invented, not measured.</div>
+      <label class="field" for="photo">Front photo
+        <input id="photo" name="photo" type="file" accept="image/*" required style="margin-top:6px;width:100%">
+      </label>
+      <img id="preview" alt="Selected photo" hidden style="max-width:100%;max-height:220px;border-radius:10px;margin-top:10px">
+      <details style="margin-top:12px">
+        <summary>More angles (optional, better shape)</summary>
+        <div class="muted">Keep the object still and walk around it a quarter turn at a time.</div>
+        <label class="field">Left side <span class="muted">(the object's left: step to your right)</span>
+          <input name="left" type="file" accept="image/*" style="margin-top:6px;width:100%"></label>
+        <label class="field">Back
+          <input name="back" type="file" accept="image/*" style="margin-top:6px;width:100%"></label>
+        <label class="field">Right side <span class="muted">(the object's right: step to your left)</span>
+          <input name="right" type="file" accept="image/*" style="margin-top:6px;width:100%"></label>
+      </details>
+      <label class="field" for="category">Category
+        <select id="category" name="category">
+          <option value="prop">Prop (static object, no rig)</option>
+          <option value="character">Character (humanoid, gets rigged)</option>
+          <option value="creature">Creature (animal or monster, gets rigged)</option>
+          <option value="auto">Auto (needs MegaMan running)</option>
+        </select>
+      </label>
+      <label class="check"><input id="force" type="checkbox"> Skip blur and lighting check</label>
+      <button id="submit" class="wide">Upload and generate</button>
+      <div id="aiMsg" role="status"></div>
+    </form>
+  </section>
 
   <section class="card">
-    <strong>Jobs</strong>
-    <div id="jobs"><div class="muted">No jobs yet.</div></div>
+    <strong>Results</strong>
+    <div id="jobs"><div class="muted" style="margin-top:6px">Nothing yet.</div></div>
   </section>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const msg = (text, cls = '') => { $('msg').textContent = text; $('msg').className = cls; };
 const kb = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const say = (id, text, cls = '') => { $(id).textContent = text; $(id).className = cls; };
 
-fetch('/api/config').then((r) => r.json()).then((c) => {
-  const gen = { local: 'local GPU (Hunyuan3D, free)', meshy: 'Meshy API (uses credits)', mock: 'mock (placeholder cube, offline)' }[c.generator] || c.generator;
-  $('mode').textContent = `Generator: ${gen} · Classifier: ${c.classifier}`;
-});
+// Storage can be blocked in private browsing; the page still works, it just can't resume a scan after a reload
+const remember = {
+  get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  set(key, value) { try { value === null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch {} },
+};
 
+let config = { scan_min_photos: 8, scan_max_side: 3200, scan: true };
+fetch('/api/config').then((r) => r.json()).then((c) => { config = c; renderScan(); });
+
+function showTab(name) {
+  $('paneScan').hidden = name !== 'scan';
+  $('paneAi').hidden = name !== 'ai';
+  $('tabScan').setAttribute('aria-selected', name === 'scan');
+  $('tabAi').setAttribute('aria-selected', name === 'ai');
+  remember.set('tab', name);
+}
+$('tabScan').onclick = () => showTab('scan');
+$('tabAi').onclick = () => showTab('ai');
+if (remember.get('tab') === 'ai') showTab('ai');
+if (!remember.get('tips-seen')) { $('tips').open = true; remember.set('tips-seen', '1'); }
+
+// ---------------- Scan: photos upload one by one as they're taken ----------------
+const shots = [];          // {el, state: 'busy'|'done'|'failed', file}
+let scanId = remember.get('scan-id');
+let uploading = 0;
+const waiting = [];
+const UPLOADS_AT_ONCE = 2;
+
+function renderScan() {
+  const done = shots.filter((s) => s.state === 'done').length;
+  const busy = shots.filter((s) => s.state === 'busy').length;
+  const failed = shots.filter((s) => s.state === 'failed').length;
+  const need = config.scan_min_photos;
+  $('scanCount').textContent = `${done} photo${done === 1 ? '' : 's'}`;
+  $('scanNeed').textContent = busy ? ` · uploading ${busy}…` : failed ? ` · ${failed} failed, tap to retry`
+    : done < need ? ` · at least ${need}` : done < 30 ? ' · 30 to 50 is best' : ' · good amount';
+  $('scanBar').style.width = Math.min(100, done / 40 * 100) + '%';
+  $('scanBar').parentElement.classList.toggle('ok', done >= 30);
+  $('startScan').disabled = done < need || busy > 0;
+  $('discardScan').hidden = !shots.length;
+}
+
+// Phone photos are huge; shrinking them here makes uploads over cell or school Wi-Fi far quicker.
+// The canvas also applies the photo's rotation. If the browser can't read the file, send it as is.
+async function shrink(file) {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const ratio = Math.min(1, config.scan_max_side / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * ratio);
+    canvas.height = Math.round(bitmap.height * ratio);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    const blob = await new Promise((done) => canvas.toBlob(done, 'image/jpeg', 0.95));
+    return blob || file;
+  } catch {
+    return file;
+  }
+}
+
+async function ensureScan() {
+  if (scanId) return scanId;
+  const res = await fetch('/api/scans', { method: 'POST' });
+  if (!res.ok) throw new Error((await res.json()).detail || 'Could not start a scan');
+  scanId = (await res.json()).id;
+  remember.set('scan-id', scanId);
+  return scanId;
+}
+
+function addShot(file) {
+  const el = document.createElement('div');
+  el.className = 'shot busy';
+  el.innerHTML = '<img alt=""><span>…</span>';
+  el.querySelector('img').src = URL.createObjectURL(file);
+  const shot = { el, file, state: 'busy' };
+  el.onclick = () => { if (shot.state === 'failed') { setShot(shot, 'busy', '…'); waiting.push(shot); pump(); } };
+  $('shots').append(el);
+  shots.push(shot);
+  waiting.push(shot);
+  renderScan();
+  pump();
+}
+
+function setShot(shot, state, label, extra = '') {
+  shot.state = state;
+  shot.el.className = `shot ${state === 'done' ? '' : state} ${extra}`;
+  shot.el.querySelector('span').textContent = label;
+  renderScan();
+}
+
+async function pump() {
+  while (uploading < UPLOADS_AT_ONCE && waiting.length) {
+    uploading += 1;
+    upload(waiting.shift()).finally(() => { uploading -= 1; pump(); });
+  }
+}
+
+async function upload(shot) {
+  try {
+    const id = await ensureScan();
+    const blob = await shrink(shot.file);
+    let lastError = 'Upload failed';
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt) await new Promise((r) => setTimeout(r, 1500 * attempt));
+      try {
+        const body = new FormData();
+        body.append('photo', blob, 'photo.jpg');
+        const res = await fetch(`/api/scans/${id}/photos`, { method: 'POST', body });
+        const data = await res.json();
+        if (res.ok) {
+          setShot(shot, 'done', data.blurry ? 'blurry' : '✓', data.blurry ? 'blurry' : '');
+          return;
+        }
+        // The server read the photo and said no: trying again won't change that
+        lastError = data.detail || lastError;
+        if (res.status < 500) break;
+      } catch (err) {
+        lastError = 'Connection dropped';
+      }
+    }
+    say('scanMsg', lastError, 'bad');
+    setShot(shot, 'failed', 'retry');
+  } catch (err) {
+    say('scanMsg', err.message, 'bad');
+    setShot(shot, 'failed', 'retry');
+  }
+}
+
+function clearScan() {
+  scanId = null;
+  remember.set('scan-id', null);
+  shots.length = 0;
+  waiting.length = 0;
+  $('shots').innerHTML = '';
+  $('longest').value = '';
+  renderScan();
+}
+
+$('shoot').onchange = (e) => { for (const f of e.target.files) addShot(f); e.target.value = ''; };
+$('library').onchange = (e) => { for (const f of e.target.files) addShot(f); e.target.value = ''; };
+
+$('startScan').onclick = async () => {
+  const body = new FormData();
+  const longest = parseFloat($('longest').value);
+  if (longest > 0) body.append('longest_mm', longest);
+  body.append('ai_depth', $('aiDepth').checked);
+  body.append('ai_fill', $('aiFill').checked);
+  $('startScan').disabled = true;
+  say('scanMsg', 'Starting…');
+  try {
+    const res = await fetch(`/api/scans/${scanId}/start`, { method: 'POST', body });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Could not start');
+    clearScan();
+    say('scanMsg', 'Scan started. You can lock your phone: follow it under Results.', 'good');
+    refresh();
+  } catch (err) {
+    say('scanMsg', err.message, 'bad');
+    renderScan();
+  }
+};
+
+$('discardScan').onclick = async () => {
+  if (!confirm('Discard these photos?')) return;
+  if (scanId) await fetch(`/api/jobs/${scanId}`, { method: 'DELETE' }).catch(() => {});
+  clearScan();
+  say('scanMsg', '');
+  refresh();
+};
+
+// Phones sometimes reload the page after taking a photo. Pick up where we left off.
+async function resumeScan() {
+  if (!scanId) return;
+  const job = await fetch(`/api/jobs/${scanId}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (!job || job.status !== 'uploading') { clearScan(); return; }
+  for (const [name, info] of Object.entries(job.files)) {
+    if (info.view !== 'scan') continue;
+    const el = document.createElement('div');
+    el.className = `shot ${info.blurry ? 'blurry' : ''}`;
+    el.innerHTML = `<img alt="" loading="lazy" src="${info.url}"><span>${info.blurry ? 'blurry' : '✓'}</span>`;
+    $('shots').append(el);
+    shots.push({ el, state: 'done' });
+  }
+  const saved = remember.get('longest');
+  if (saved) $('longest').value = saved;
+  renderScan();
+}
+$('longest').oninput = () => remember.set('longest', $('longest').value || null);
+
+// ---------------- AI model: the Hunyuan3D path ----------------
 $('photo').addEventListener('change', () => {
   const file = $('photo').files[0];
   if (!file) return;
   $('preview').src = URL.createObjectURL(file);
-  $('preview').style.display = 'block';
+  $('preview').hidden = false;
 });
 
 $('form').addEventListener('submit', async (e) => {
@@ -112,79 +385,149 @@ $('form').addEventListener('submit', async (e) => {
   body.append('category', $('category').value);
   body.append('force', $('force').checked);
   $('submit').disabled = true;
-  msg('Uploading…');
+  say('aiMsg', 'Uploading…');
   try {
     const res = await fetch('/api/jobs', { method: 'POST', body });
     const data = await res.json();
-    if (!res.ok) {
-      const q = data.quality && data.quality.sharpness !== undefined
-        ? ` (sharpness ${data.quality.sharpness}, brightness ${data.quality.brightness})` : '';
-      msg((typeof data.detail === 'string' ? data.detail : 'Upload failed') + q, 'bad');
-    } else {
-      msg(`Job ${data.id} queued.`, 'good');
-      refresh();
-    }
+    if (!res.ok) say('aiMsg', typeof data.detail === 'string' ? data.detail : 'Upload failed', 'bad');
+    else { say('aiMsg', 'Queued. Follow it under Results.', 'good'); refresh(); }
   } catch (err) {
-    msg('Upload failed: ' + err.message, 'bad');
+    say('aiMsg', 'Upload failed: ' + err.message, 'bad');
   } finally {
     $('submit').disabled = false;
   }
 });
 
+// ---------------- Results ----------------
+const STATUS = { uploading: 'Waiting for photos', queued: 'Waiting in line', classifying: 'Classifying', generating: 'Working', rigging: 'Rigging', downloading: 'Saving', done: 'Done', failed: 'Failed' };
+
+function scanSummary(j) {
+  const r = j.scan && j.scan.report;
+  if (!r) return '';
+  const size = r.size_mm
+    ? `<div class="size">${r.size_mm[0]} × ${r.size_mm[2]} × ${r.size_mm[1]} mm</div><div class="muted">length × width × height, from your ${esc(r.scaled_from_mm)} mm measurement</div>`
+    : `<div class="size">${r.proportions[0]} : ${r.proportions[2]} : ${r.proportions[1]}</div><div class="muted">proportions only: no real size was entered</div>`;
+  const facts = [
+    `${r.photos_used} of ${r.photos_uploaded} photos used`,
+    r.points_on_object ? `${Number(r.points_on_object).toLocaleString()} points on the piece` : '',
+    r.reprojection_error_px ? `${r.reprojection_error_px} px alignment error` : '',
+    r.seconds ? `${Math.round(r.seconds / 60)} min` : '',
+  ].filter(Boolean).join(' · ');
+  const s = r.surface_pct;
+  const estimated = s && (s.ai_depth + s.ai_fill + s.smoothed) > 0;
+  const seg = (pct, cls) => pct > 0 ? `<span class="${cls}" style="width:${pct}%"></span>` : '';
+  const key = (pct, cls, label) => pct > 0 ? `<span><i class="${cls}"></i>${label} ${pct}%</span>` : '';
+  const sources = estimated ? `<div class="sources" role="img" aria-label="${s.measured}% of the surface measured">
+      ${seg(s.measured, 'src-measured')}${seg(s.ai_depth, 'src-depth')}${seg(s.ai_fill, 'src-fill')}${seg(s.smoothed, 'src-smooth')}</div>
+    <div class="source-key">${key(s.measured, 'src-measured', 'Measured')}${key(s.ai_depth, 'src-depth', 'AI depth')}${key(s.ai_fill, 'src-fill', 'AI fill')}${key(s.smoothed, 'src-smooth', 'Smoothed')}</div>
+    ${r.ai_depth_check_mm && s.ai_depth > 0 ? `<div class="muted report">AI depth self-check: off by ${r.ai_depth_check_mm.median} mm (median) on measured points it wasn't shown</div>` : ''}` : '';
+  const warnings = (r.warnings || []).length ? `<ul class="warnings">${r.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>` : '';
+  return `${size}${sources}<div class="muted report">${facts}</div>${warnings}`;
+}
+
 function jobHtml(j) {
   const f = j.files || {};
-  const thumb = f['thumbnail.png'] ? f['thumbnail.png'].url : (f['photo.jpg'] ? f['photo.jpg'].url : '');
-  const cat = j.category ? `${j.category} <span class="muted">(${esc(j.category_source)})</span>` : esc(j.requested_category);
-  const views = Object.values(f).filter((i) => i.kind === 'photo').length;
-  const angles = views > 1 ? ` · ${views} angles` : '';
-  const rig = j.rig_status ? ` · rig: ${esc(j.rig_status)}` : '';
-  const err = j.error ? `<div class="bad">${esc(j.error)}</div>` : '';
-  const note = j.classifier_note ? `<div class="muted">Classifier: ${esc(j.classifier_note)}</div>` : '';
-  const links = Object.entries(f).map(([n, i]) => `<a href="${i.url}" download>${n} (${kb(i.size)})</a>`).join('');
+  const isScan = j.mode === 'scan';
+  const firstPhoto = Object.keys(f).find((n) => f[n].kind === 'photo');
+  const thumb = f['thumbnail.png'] ? f['thumbnail.png'].url : (firstPhoto ? f[firstPhoto].url : '');
+  const photoCount = Object.values(f).filter((i) => i.kind === 'photo').length;
+  const running = !['done', 'failed', 'uploading'].includes(j.status);
+  const kind = isScan ? `Scan · ${photoCount} photos` : `AI model · ${esc(j.category || j.requested_category)}${photoCount > 1 ? ` · ${photoCount} angles` : ''}`;
   const glb = f['rigged.glb'] || f['model.glb'];
-  const viewer = j.status === 'done' && glb
-    ? `<model-viewer src="${glb.url}" camera-controls auto-rotate shadow-intensity="1" alt="Generated model"></model-viewer>` : '';
-  const retry = j.status === 'failed' ? `<button class="ghost" data-retry="${j.id}">Retry</button>` : '';
+  const downloads = Object.entries(f).filter(([, i]) => i.kind !== 'photo' && i.kind !== 'thumbnail' && i.kind !== 'scan_view')
+    .map(([n, i]) => `<a class="button ghost small" href="${i.url}" download>${esc(n)} (${kb(i.size)})</a>`).join('');
+  const buttons = [
+    j.status === 'done' && glb ? `<button class="small" data-view="${glb.url}" data-label="View 3D">View 3D</button>` : '',
+    j.status === 'done' && f['model_sources.glb'] ? `<button class="small ghost" data-view="${f['model_sources.glb'].url}" data-label="Show what's measured">Show what's measured</button>` : '',
+    j.status === 'done' && f['model_measured.glb'] ? `<button class="small ghost" data-view="${f['model_measured.glb'].url}" data-label="Measured only">Measured only</button>` : '',
+    downloads,
+    j.status === 'failed' ? `<button class="small" data-retry="${j.id}">Retry</button>` : '',
+    !running ? `<button class="ghost small danger" data-delete="${j.id}">Delete</button>` : '',
+  ].join('');
   return `<div class="job" id="job-${j.id}">
-    <img src="${thumb}" alt="">
-    <div>
-      <div><strong>${esc(j.status)}</strong> · ${cat}${angles}${rig} <span class="muted">· ${j.id}</span></div>
-      <div class="bar"><div style="width:${j.progress}%"></div></div>
-      ${note}${err}
-      <div class="files">${links} ${retry}</div>
-      ${viewer}
+    <div class="job-head">
+      <img src="${thumb}" alt="" loading="lazy">
+      <div>
+        <div><strong class="${j.status === 'failed' ? 'bad' : j.status === 'done' ? 'good' : ''}">${STATUS[j.status] || esc(j.status)}</strong></div>
+        <div class="muted">${kind}</div>
+        ${running ? `<div class="muted">${esc(j.stage || '')}</div><div class="meter"><div style="width:${j.progress}%"></div></div>` : ''}
+      </div>
     </div>
+    ${isScan ? scanSummary(j) : ''}
+    ${j.error ? `<div class="bad" style="margin-top:8px">${esc(j.error)}</div>` : ''}
+    <div class="job-actions">${buttons}</div>
+    <div class="viewer"></div>
   </div>`;
 }
 
 async function refresh() {
   const jobs = await fetch('/api/jobs?limit=20').then((r) => r.json()).catch(() => null);
   if (!jobs) return;
-  if (!jobs.length) return;
-  // Re-render only jobs that changed, so 3D previews don't reload every poll
   const box = $('jobs');
-  if (box.firstElementChild && box.firstElementChild.classList.contains('muted')) box.innerHTML = '';
-  for (const j of [...jobs].reverse()) {
-    const key = `${j.status}|${j.progress}|${j.rig_status}|${j.error}`;
-    let el = $('job-' + j.id);
+  const visible = jobs.filter((j) => j.id !== scanId);
+  if (visible.length && box.firstElementChild && box.firstElementChild.classList.contains('muted')) box.innerHTML = '';
+  const ids = new Set(visible.map((j) => 'job-' + j.id));
+  for (const el of [...box.querySelectorAll('.job')]) if (!ids.has(el.id)) el.remove();
+  if (!visible.length && !box.children.length) box.innerHTML = '<div class="muted" style="margin-top:6px">Nothing yet.</div>';
+  // Only redraw jobs that changed, so an open 3D view doesn't reload on every check
+  for (const j of [...visible].reverse()) {
+    const key = `${j.status}|${j.progress}|${j.stage}|${j.error}`;
+    const el = $('job-' + j.id);
     if (el && el.dataset.key === key) continue;
-    const tmp = document.createElement('div');
-    tmp.innerHTML = jobHtml(j);
-    const fresh = tmp.firstElementChild;
+    const holder = document.createElement('div');
+    holder.innerHTML = jobHtml(j);
+    const fresh = holder.firstElementChild;
     fresh.dataset.key = key;
     if (el) el.replaceWith(fresh); else box.prepend(fresh);
   }
 }
 
+// The 3D viewer library only loads when someone asks for it, which keeps the page quick on a phone
+let viewerLoading = null;
+function loadViewer() {
+  if (!viewerLoading) {
+    viewerLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.type = 'module';
+      s.src = 'https://unpkg.com/@google/model-viewer@3.5.0/dist/model-viewer.min.js';
+      s.onload = resolve;
+      s.onerror = () => { viewerLoading = null; reject(new Error('Could not load the 3D viewer')); };
+      document.head.append(s);
+    });
+  }
+  return viewerLoading;
+}
+
 $('jobs').addEventListener('click', async (e) => {
-  const id = e.target.dataset && e.target.dataset.retry;
-  if (!id) return;
-  await fetch(`/api/jobs/${id}/retry`, { method: 'POST' });
-  refresh();
+  const t = e.target;
+  if (t.dataset.retry) { await fetch(`/api/jobs/${t.dataset.retry}/retry`, { method: 'POST' }); refresh(); }
+  if (t.dataset.delete && confirm('Delete this result and its files?')) { await fetch(`/api/jobs/${t.dataset.delete}`, { method: 'DELETE' }); refresh(); }
+  if (t.dataset.view) {
+    const holder = t.closest('.job').querySelector('.viewer');
+    // Each button shows its own version of the model, so only one label at a time can say "Hide"
+    const buttons = t.closest('.job').querySelectorAll('[data-view]');
+    const wasOpen = holder.dataset.showing === t.dataset.view;
+    holder.innerHTML = '';
+    delete holder.dataset.showing;
+    buttons.forEach((b) => { b.textContent = b.dataset.label; });
+    if (wasOpen) return;
+    t.textContent = 'Loading…';
+    try {
+      await loadViewer();
+      holder.innerHTML = `<model-viewer src="${t.dataset.view}" camera-controls touch-action="pan-y" auto-rotate shadow-intensity="1" alt="3D model"></model-viewer>`;
+      holder.dataset.showing = t.dataset.view;
+      t.textContent = 'Hide 3D';
+    } catch (err) {
+      t.textContent = t.dataset.label;
+      holder.innerHTML = `<div class="bad">${esc(err.message)}</div>`;
+    }
+  }
 });
 
+resumeScan();
+renderScan();
 refresh();
-setInterval(refresh, 2000);
+setInterval(() => { if (!document.hidden) refresh(); }, 3000);
 </script>
 </body>
 </html>
