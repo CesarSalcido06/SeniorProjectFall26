@@ -177,7 +177,8 @@ class MockMeshy:
             state["thumbnail_url"] = f"mock://{c}/thumbnail.png"
         return state
 
-    async def create_scan(self, photos: list, longest_mm: float | None, ai_depth: bool = True, ai_fill: bool = True) -> str:
+    async def create_scan(self, photos: list, longest_mm: float | None, ai_depth: bool = True, ai_fill: bool = True,
+                          check_mm: float | None = None) -> str:
         task_id = "mock-scan-" + uuid.uuid4().hex[:8]
         self._tasks[task_id] = {
             "started": time.monotonic(), "category": "prop", "longest_mm": longest_mm, "ai_depth": ai_depth, "ai_fill": ai_fill,
@@ -271,12 +272,15 @@ class LocalGeneratorClient:
             task["task_error"] = {"message": task["error"]}
         return task
 
-    async def create_scan(self, photos: list, longest_mm: float | None, ai_depth: bool = True, ai_fill: bool = True) -> str:
+    async def create_scan(self, photos: list, longest_mm: float | None, ai_depth: bool = True, ai_fill: bool = True,
+                          check_mm: float | None = None) -> str:
         """photos: paths of the JPEGs on disk. Sent as a form, since dozens of photos are too big for JSON."""
         files = [("photos", (path.name, path.read_bytes(), "image/jpeg")) for path in photos]
         data = {"ai_depth": str(ai_depth).lower(), "ai_fill": str(ai_fill).lower()}
         if longest_mm:
             data["longest_mm"] = str(longest_mm)
+        if check_mm:
+            data["check_mm"] = str(check_mm)
         try:
             resp = await self._client.post("/scans", files=files, data=data, timeout=300)
         except httpx.TransportError as exc:

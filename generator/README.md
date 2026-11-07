@@ -84,6 +84,7 @@ Every surface point remembers where it came from:
 | Source | How it's made | Turn off with |
 |---|---|---|
 | Measured | Triangulated from the photos by COLMAP | can't be turned off |
+| Outline | The shape left after carving away everything outside the piece's outline in each photo (`tools/scan_outlines.py`, `tools/scan_hull.py`). Works on plain and clear objects, but can't show dents or hollows. | can't be turned off |
 | AI depth | Depth Anything V2 Small (`tools/scan_depth_model.py`, downloads about 100 MB on first use), fitted per photo to measured points and kept only where several photos agree (`tools/scan_depth_help.py`). Fills plain faces. | `ai_depth=false` |
 | AI fill | Hunyuan3D-2mv model made from 4 of the photos, lined up with the scan, used only in holes (`tools/scan_fill.py`). Fills unseen areas like the underside. | `ai_fill=false` |
 

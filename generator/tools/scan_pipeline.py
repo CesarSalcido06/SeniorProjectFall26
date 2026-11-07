@@ -1,15 +1,23 @@
 """Photos of a real object -> a measured 3D model, using photogrammetry (COLMAP).
 
-Every point starts out triangulated from photos that see it. Two optional helpers then add to that, and every point
-remembers where it came from, so the report can say how much of the model was really measured:
-  --ai-python  adds points on plain faces COLMAP can't measure (scan_depth_help.py)
-  scan_fill.py fills what no photo saw, like the underside, from Hunyuan3D (runs after this script)
-The size of the model only ever comes from measured points.
+How the work is split: the AI finds the object in each photo (scan_outlines.py), and photogrammetry works out where
+the cameras were. Together those give a shape with real proportions (scan_hull.py). Every point on the model remembers
+where it came from, so the report can say how much of it was really measured:
+  measured     triangulated from photos, only possible where there's texture
+  outline      from the hull: right on the outside, but it can't show dents or hollows
+  AI depth     estimated on plain faces (--ai-depth, scan_depth_help.py)
+  AI fill      from Hunyuan3D, for what's still left (scan_fill.py, runs after this script)
 
-Steps: find features -> match them -> solve the camera positions -> depth map per photo -> merge into a point
-cloud -> drop the table and stray clutter -> build a mesh -> stand it upright, scale to real size -> GLB.
+If the outlines can't agree on one shape, which is what happens when the piece gets turned instead of the phone, the
+scan can't be measured. Rather than hand back a piece of the table, it stops early with "mode": "estimate" in the
+report, and scan_fill.py makes the model from Hunyuan3D alone, sized from the typed measurement and labeled as a guess.
 
-Usage: .venv-scan/bin/python tools/scan_pipeline.py <photo dir> <work dir> [--longest-mm 62.5] [--ai-python .venv/bin/python]
+Steps: outlines -> find features -> match them -> solve the camera positions -> check the outlines agree -> depth map
+per photo -> merge into a point cloud -> keep what's inside the outlines -> add the hull where nothing was measured ->
+build a mesh -> stand it upright -> scale to real size, measured off the finished mesh -> GLB.
+
+Usage: .venv-scan/bin/python tools/scan_pipeline.py <photo dir> <work dir> --ai-python .venv/bin/python
+           [--longest-mm 62.5] [--check-mm 35] [--ai-depth]
 Prints "PROGRESS <pct> <stage>" lines, "ERROR <message for the user>" on failure, and writes to <work dir>:
   model.glb           the model
   model_measured.glb  only what was measured (written when something was added)
@@ -29,11 +37,11 @@ import numpy as np
 import pycolmap
 import trimesh
 from PIL import Image
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import connected_components
+from scipy.ndimage import binary_erosion
 from scipy.spatial import cKDTree
 
 import scan_depth_help
+import scan_hull
 
 # Depth maps above this size don't reliably fit in the 3060's 12 GB
 DENSE_MAX_SIDE = 2000
@@ -41,9 +49,20 @@ MAX_FACES = 150_000
 MIN_PHOTOS = 8
 
 # Where a surface point came from
-MEASURED, AI_DEPTH, AI_FILL = 0, 1, 2
-# Colors for model_sources.glb: blue measured, orange AI depth, pink AI fill, grey smoothed over by the mesher
-SOURCE_COLORS = np.array([[47, 128, 237, 255], [245, 158, 11, 255], [219, 39, 119, 255], [150, 150, 150, 255]], np.uint8)
+MEASURED, AI_DEPTH, AI_FILL, OUTLINE = 0, 1, 2, 3
+SMOOTHED = 4  # no point nearby: the mesher bridged the gap
+# Colors for model_sources.glb: blue measured, orange AI depth, pink AI fill, green outline, grey smoothed
+SOURCE_COLORS = np.array([
+    [47, 128, 237, 255], [245, 158, 11, 255], [219, 39, 119, 255], [16, 185, 129, 255], [150, 150, 150, 255],
+], np.uint8)
+# If this much of the hull already has measured points on it, measured points decide the size. The hull runs a little
+# big, because no outline can see into a corner from every side.
+TRUST_MEASURED_SHARE = 0.6
+# A side counts as a real flat face if measured points within this much of it (fraction of the longest side) land in
+# this share of a grid laid over it
+FACE_THICKNESS = 0.015
+FACE_CELLS = 20
+FACE_COVERAGE = 0.35
 
 
 class ScanFailed(Exception):
@@ -68,35 +87,55 @@ def group_by_size(photos: Path, images: Path) -> int:
     return count
 
 
-def solve_cameras(images: Path, work: Path, total: int) -> tuple[pycolmap.Reconstruction, Path]:
-    database, sparse = work / "colmap.db", work / "sparse"
+def find_outlines(images: Path, work: Path, ai_python: str) -> Path:
+    say(3, "finding the piece in each photo")
+    outlines = work / "outlines"
+    script = Path(__file__).resolve().parent / "scan_outlines.py"
+    done = subprocess.run([ai_python, str(script), str(images), str(outlines)], capture_output=True, text=True, errors="replace")
+    if done.returncode != 0:
+        print(done.stdout[-2000:], done.stderr[-2000:], flush=True)
+        raise ScanFailed("Couldn't find the piece in the photos because the outline step crashed. See the scan log.")
+    return outlines
+
+
+def shrunk_outlines(outlines: Path, target: Path) -> Path:
+    """Copies of the outlines pulled in a bit, so features on the edge, which are half background, get left out."""
+    for mask in outlines.glob("*/*.png"):
+        folder = target / mask.parent.name
+        folder.mkdir(parents=True, exist_ok=True)
+        pulled_in = binary_erosion(np.asarray(Image.open(mask)) > 128, iterations=6)
+        Image.fromarray((pulled_in * 255).astype(np.uint8)).save(folder / mask.name)
+    return target
+
+
+def solve_cameras(images: Path, work: Path, name: str = "", masks: Path | None = None) -> tuple[pycolmap.Reconstruction, Path] | None:
+    """Works out where each photo was taken from. Given masks, only features on the object count."""
+    database, sparse = work / f"colmap{name}.db", work / f"sparse{name}"
     sparse.mkdir(exist_ok=True)
 
-    say(5, "finding features")
     extraction = pycolmap.FeatureExtractionOptions()
     extraction.max_image_size = 3200
-    extraction.sift.max_num_features = 12000
-    pycolmap.extract_features(database, images, camera_mode=pycolmap.CameraMode.PER_FOLDER, extraction_options=extraction)
-
-    say(15, "matching photos")
+    extraction.sift.max_num_features = 20000
+    # Lower than the default, so low-contrast surfaces like a plain table or plastic still give features
+    extraction.sift.peak_threshold = 0.002
+    reader = pycolmap.ImageReaderOptions()
+    if masks is not None:
+        reader.mask_path = str(masks)
+    pycolmap.extract_features(database, images, camera_mode=pycolmap.CameraMode.PER_FOLDER, reader_options=reader, extraction_options=extraction)
     pycolmap.match_exhaustive(database)
 
-    say(25, "solving camera positions")
-    solved = pycolmap.incremental_mapping(database, images, sparse)
+    # Real photos of plain things match weakly, and COLMAP's defaults left half of them out. The outline check after
+    # this is what catches a bad solve, so it's fine to let more photos in here.
+    mapping = pycolmap.IncrementalPipelineOptions()
+    mapping.min_num_matches = 8
+    mapping.mapper.init_min_num_inliers = 30
+    mapping.mapper.abs_pose_min_num_inliers = 12
+    mapping.mapper.abs_pose_min_inlier_ratio = 0.12
+    solved = pycolmap.incremental_mapping(database, images, sparse, options=mapping)
     if not solved:
-        raise ScanFailed(
-            "None of the photos lined up with each other. Put the piece on a sheet of newspaper or printed text, "
-            "and overlap each shot with the last one by about two thirds."
-        )
+        return None
     best_id = max(solved, key=lambda key: solved[key].num_reg_images())
-    best = solved[best_id]
-    aligned = best.num_reg_images()
-    if aligned < MIN_PHOTOS or aligned < total * 0.5:
-        raise ScanFailed(
-            f"Only {aligned} of {total} photos lined up. Move in smaller steps around the piece and keep the "
-            "printed sheet in frame."
-        )
-    return best, sparse / str(best_id)
+    return solved[best_id], sparse / str(best_id)
 
 
 def build_point_cloud(sparse: Path, images: Path, work: Path) -> Path:
@@ -125,6 +164,10 @@ def build_point_cloud(sparse: Path, images: Path, work: Path) -> Path:
 
 
 _PLY_TYPES = {"float": "f4", "float32": "f4", "double": "f8", "uchar": "u1", "uint8": "u1"}
+
+
+def tagged_xyz(cloud: np.ndarray) -> np.ndarray:
+    return np.stack([cloud["x"], cloud["y"], cloud["z"]], axis=1).astype(np.float64)
 
 
 def read_cloud(path: Path) -> np.ndarray:
@@ -182,67 +225,40 @@ def find_table(points: np.ndarray, cameras: np.ndarray, size: float) -> tuple[np
     return refined, float(refined @ center)
 
 
-def aim_point(best: pycolmap.Reconstruction) -> tuple[np.ndarray, np.ndarray]:
-    """Where the cameras were all pointing (should be the object). Also returns the camera positions."""
-    centers, directions = [], []
-    for image in best.images.values():
-        if image.has_pose:
-            centers.append(image.projection_center())
-            directions.append(image.viewing_direction())
-    centers, directions = np.array(centers), np.array(directions)
-    # Least-squares closest point to all the viewing rays
-    system = np.zeros((3, 3))
-    target = np.zeros(3)
-    for center, direction in zip(centers, directions):
-        project = np.eye(3) - np.outer(direction, direction)
-        system += project
-        target += project @ center
-    return np.linalg.solve(system, target), centers
+def isolate_object(cloud: np.ndarray, views: list, warnings: list[str], object_size: float):
+    """Keeps what's inside the object's outline in the photos that can see it. Returns (kept cloud, up, table offset).
 
-
-def isolate_object(cloud: np.ndarray, best: pycolmap.Reconstruction, warnings: list[str]):
-    """Throws away the table and anything not connected to the object. Returns (kept cloud, up, table offset)."""
+    The table is found from the points outside the outlines, since those can't be the object. Anything in the photos
+    that isn't the object goes the same way, without needing to guess which part of the point cloud is which.
+    """
     points = np.stack([cloud["x"], cloud["y"], cloud["z"]], axis=1).astype(np.float64)
-    target, cameras = aim_point(best)
-    size = float(np.linalg.norm(np.percentile(points, 95, axis=0) - np.percentile(points, 5, axis=0)))
+    inside, seen = scan_hull.object_votes(views, points)
+    on_object = (seen >= 2) & (inside >= seen * 0.8)
+    # Most photos, not all: one bad outline shouldn't be able to take a point off the table
+    outside = inside <= seen * 0.25
 
-    table = find_table(points, cameras, size)
-    keep = np.ones(len(points), bool)
+    # Only look near the object. Walls and furniture also make flat surfaces, and there can be a lot more of them.
+    cameras = np.array([view.center for view in views])
+    if on_object.any():
+        middle = np.median(points[on_object], axis=0)
+        outside &= np.linalg.norm(points - middle, axis=1) < object_size * 1.5
+    table = find_table(points[outside], cameras, object_size) if outside.sum() >= 1000 else None
     up, offset = None, 0.0
     if table is None:
-        warnings.append("Couldn't find the table, so the base of the model may not be flat.")
+        warnings.append("Couldn't find the table, so the base of the model comes from the lowest point seen.")
     else:
         up, offset = table
         heights = points @ up - offset
-        near = np.abs(heights) < size * 0.004
-        noise = float(np.median(np.abs(heights[near]))) * 1.4826
-        keep = heights > max(3 * noise, size * 0.0015)
+        near = np.abs(heights) < object_size * 0.004
+        noise = float(np.median(np.abs(heights[near]))) * 1.4826 if near.any() else 0.0
+        on_object &= heights > max(3 * noise, object_size * 0.0015)
 
-    candidates = np.flatnonzero(keep)
-    if len(candidates) < 500:
-        raise ScanFailed("Almost nothing was measured on the piece itself. It may be too shiny or plain: see the tips.")
-
-    # Connect points that touch; the object is the blob the cameras were aimed at
-    rng = np.random.default_rng(0)
-    subset = candidates if len(candidates) <= 200_000 else rng.choice(candidates, 200_000, replace=False)
-    tree = cKDTree(points[subset])
-    spacing = float(np.median(tree.query(points[subset], k=2)[0][:, 1]))
-    pairs = tree.query_pairs(spacing * 5, output_type="ndarray")
-    graph = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(subset), len(subset)))
-    _, labels = connected_components(graph, directed=False)
-    counts = np.bincount(labels)
-    # Blobs far from the aim point count for less, so a big bit of clutter can't beat the object
-    centers = np.stack([np.bincount(labels, points[subset, i]) / counts for i in range(3)], axis=1)
-    scores = counts * np.exp(-np.linalg.norm(centers - target, axis=1) / (size * 0.25))
-    chosen = np.argmax(scores)
-    nearest = tree.query(points[candidates])[1]
-    kept = candidates[labels[nearest] == chosen]
-
-    # Drop lone noisy points hovering off the surface
-    kept_points = points[kept]
-    tree = cKDTree(kept_points)
-    mean_gap = tree.query(kept_points, k=9)[0][:, 1:].mean(axis=1)
-    kept = kept[mean_gap < mean_gap.mean() + 2.5 * mean_gap.std()]
+    kept = np.flatnonzero(on_object)
+    if len(kept) >= 50:
+        # Drop lone noisy points hovering off the surface
+        tree = cKDTree(points[kept])
+        mean_gap = tree.query(points[kept], k=9)[0][:, 1:].mean(axis=1)
+        kept = kept[mean_gap < mean_gap.mean() + 2.5 * mean_gap.std()]
     return cloud[kept], up, offset
 
 
@@ -281,7 +297,7 @@ def upright_frame(points: np.ndarray, up: np.ndarray | None, offset: float):
     return rotation, shift
 
 
-def add_ai_depth(best, cloud_file: Path, work: Path, ai_python: str, warnings: list[str]) -> tuple[Path, dict | None]:
+def add_ai_depth(cloud_file: Path, work: Path, ai_python: str, views: list, object_size: float, warnings: list[str]) -> tuple[Path, dict | None]:
     """Adds estimated points on faces COLMAP couldn't measure. If anything goes wrong the scan just carries on without."""
     say(83, "estimating plain faces")
     predictions = work / "ai_depth"
@@ -296,7 +312,10 @@ def add_ai_depth(best, cloud_file: Path, work: Path, ai_python: str, warnings: l
         return cloud_file, None
 
     cloud = read_cloud(cloud_file)
-    object_cloud, up, offset = isolate_object(cloud, best, [])
+    object_cloud, up, offset = isolate_object(cloud, views, [], object_size)
+    if len(object_cloud) < 500:
+        warnings.append("Too little was measured on the piece to fit the plain-face estimate to.")
+        return cloud_file, None
     object_points = np.stack([object_cloud["x"], object_cloud["y"], object_cloud["z"]], axis=1).astype(np.float64)
     center = object_points.mean(axis=0)
     size = float(np.linalg.norm(np.ptp(object_points, axis=0)))
@@ -324,6 +343,8 @@ def build_mesh(cloud_file: Path, work: Path, trim: int = 6) -> trimesh.Trimesh:
     options.trim = trim
     pycolmap.poisson_meshing(cloud_file, meshed, options)
     mesh = trimesh.load(meshed, process=False)
+    if not isinstance(mesh, trimesh.Trimesh) or not len(mesh.faces):
+        raise ScanFailed("No surface could be built from these photos. Take more of them, with smaller steps between shots.")
     pieces = mesh.split(only_watertight=False)
     mesh = max(pieces, key=lambda piece: len(piece.faces))  # stray islands aren't part of the object
     if len(mesh.faces) > MAX_FACES:
@@ -335,9 +356,9 @@ def build_mesh(cloud_file: Path, work: Path, trim: int = 6) -> trimesh.Trimesh:
 
 
 def source_of_vertices(vertices: np.ndarray, points: np.ndarray, source: np.ndarray, reach: float) -> np.ndarray:
-    """For each mesh vertex: the first source with a point within reach, measured first. 3 means none was close."""
-    result = np.full(len(vertices), 3, np.uint8)
-    for kind in (AI_FILL, AI_DEPTH, MEASURED):  # last one wins
+    """For each mesh vertex: the first source with a point within reach, measured first."""
+    result = np.full(len(vertices), SMOOTHED, np.uint8)
+    for kind in (AI_FILL, OUTLINE, AI_DEPTH, MEASURED):  # last one wins
         chosen = points[source == kind]
         if len(chosen):
             result[cKDTree(chosen).query(vertices)[0] <= reach] = kind
@@ -349,7 +370,7 @@ def surface_shares(mesh: trimesh.Trimesh, per_vertex: np.ndarray) -> dict:
     area = mesh.area_faces
     kinds = per_vertex[mesh.faces[:, 0]]
     share = lambda kind: round(float(area[kinds == kind].sum() / area.sum() * 100), 1)
-    return {"measured": share(MEASURED), "ai_depth": share(AI_DEPTH), "ai_fill": share(AI_FILL), "smoothed": share(3)}
+    return {"measured": share(MEASURED), "outline": share(OUTLINE), "ai_depth": share(AI_DEPTH), "ai_fill": share(AI_FILL), "smoothed": share(SMOOTHED)}
 
 
 def export_models(mesh: trimesh.Trimesh, points, colors, source, work: Path, reach: float, patched_from: int | None = None) -> dict:
@@ -370,26 +391,110 @@ def export_models(mesh: trimesh.Trimesh, points, colors, source, work: Path, rea
     return {"faces": len(model.faces), "shares": surface_shares(model, per_vertex)}
 
 
-def run(photos: Path, work: Path, longest_mm: float | None, ai_python: str | None = None) -> dict:
+def measurable_solve(images: Path, work: Path, outlines: Path) -> dict:
+    """Finds a camera solve the outlines agree with. Returns the best try, whether or not it can be measured."""
+    say(8, "solving camera positions")
+    # Using the whole photo is the most stable when the phone went around the piece
+    first = _check_solve(solve_cameras(images, work), images, outlines, False)
+    if first["usable"]:
+        return first
+    # If the piece got turned, the background is what fooled the first try, so try again with only the piece
+    say(25, "solving again from the piece alone")
+    second = _check_solve(
+        solve_cameras(images, work, "_object", shrunk_outlines(outlines, work / "outlines_shrunk")), images, outlines, True,
+    )
+    return second if second["usable"] or first["solve"] is None else first
+
+
+def _check_solve(solved, images: Path, outlines: Path, object_only: bool) -> dict:
+    if solved is None or solved[0].num_reg_images() < scan_hull.MIN_AGREEING_PHOTOS:
+        return {"usable": False, "reason": "no_solve", "views": [], "dropped": [], "agreement": 0.0, "gap": 360.0, "solve": solved, "object_only": object_only}
+    best, _ = solved
+    say(30, "checking the photos agree")
+    check = scan_hull.agreeing_views(scan_hull.load_views(best, outlines, images))
+    print(
+        f"outline check: object_only={object_only} photos={best.num_reg_images()} kept={len(check['views'])} "
+        f"agreement={check['agreement']:.3f} gap={check['gap']:.0f} reason={check['reason']}", flush=True,
+    )
+    return {**check, "solve": solved, "object_only": object_only}
+
+
+ESTIMATE_REASONS = {
+    "no_circle": "These photos don't go all the way around the piece, usually because the piece was turned while the "
+                 "phone stayed still. The scan can only measure what the phone moved around.",
+    "disagree": "The piece's outline doesn't match from photo to photo, usually because it was moved or flipped "
+                "between shots. The scan needs it to stay put the whole time.",
+    "no_solve": "Too few of the photos could be lined up with each other. That happens when the piece gets moved, or "
+                "is clear or very shiny. Keep it still on newspaper or printed text, and overlap each shot by about two thirds.",
+}
+
+
+def pick_estimate_photo(work: Path, outlines: Path, images: Path) -> str:
+    """The clearest side-on photo for the AI model: the whole piece in frame, big, and with its longest outline."""
+    best_name, best_score = None, -1.0
+    for mask in sorted(outlines.glob("*/*.png")):
+        outline = np.asarray(Image.open(mask)) > 128
+        rows, columns = np.nonzero(outline)
+        if not len(rows):
+            continue
+        height, width = outline.shape
+        margin = int(min(outline.shape) * 0.01)
+        if rows.min() <= margin or columns.min() <= margin or rows.max() >= height - margin or columns.max() >= width - margin:
+            continue  # cut off by the frame
+        long_side, short_side = sorted((np.ptp(rows) + 1, np.ptp(columns) + 1), reverse=True)
+        score = outline.mean() * (long_side / short_side)
+        if score > best_score:
+            best_name, best_score = str(mask.relative_to(outlines))[: -len(".png")], score
+    if best_name is None:
+        raise ScanFailed("The whole piece isn't in frame in any of the photos. Step back so it fits, with some space around it.")
+    return str(images / best_name)
+
+
+def run(photos: Path, work: Path, longest_mm: float | None, ai_python: str, ai_depth: bool = False, check_mm: float | None = None) -> dict:
     started = time.monotonic()
     images = work / "images"
     total = group_by_size(photos, images)
     if total < MIN_PHOTOS:
         raise ScanFailed(f"A scan needs at least {MIN_PHOTOS} photos ({total} uploaded); 30 to 50 works best.")
 
-    best, sparse = solve_cameras(images, work, total)
+    outlines = find_outlines(images, work, ai_python)
+    check = measurable_solve(images, work, outlines)
+    if not check["usable"]:
+        solved = check.get("solve")
+        report = {
+            "mode": "estimate",
+            "photos_uploaded": total,
+            "photos_used": 1,  # the AI model only gets the one photo
+            "photos_lined_up": solved[0].num_reg_images() if solved else 0,
+            "estimate_reason": ESTIMATE_REASONS[check["reason"]],
+            "estimate_photo": pick_estimate_photo(work, outlines, images),
+            "outline_agreement": round(check["agreement"], 3),
+            "scaled_from_mm": longest_mm,
+            "checked_with_mm": check_mm,
+            "warnings": [],
+            "seconds": round(time.monotonic() - started, 1),
+        }
+        return report
+
+    best, sparse = check["solve"]
+    views = check["views"]
+    rough = scan_hull.carve(views, passes=scan_hull.FAST_PASSES)
+    object_size = float(np.linalg.norm(np.ptp(rough.points(), axis=0)))
     cloud_file = build_point_cloud(sparse, images, work)
     warnings: list[str] = []
+    if check["dropped"]:
+        warnings.append(f"{len(check['dropped'])} photo(s) didn't agree with the rest and weren't used for the shape.")
     depth_stats = None
-    if ai_python:
-        cloud_file, depth_stats = add_ai_depth(best, cloud_file, work, ai_python, warnings)
-    report = finish(best, cloud_file, work, longest_mm, total, depth_stats, warnings)
+    if ai_depth:
+        cloud_file, depth_stats = add_ai_depth(cloud_file, work, ai_python, views, object_size, warnings)
+    report = finish(best, cloud_file, work, longest_mm, total, views, object_size, depth_stats, warnings, check)
     report["seconds"] = round(time.monotonic() - started, 1)
+    measure_final(work, longest_mm, check_mm, report)
     return report
 
 
-def finish(best: pycolmap.Reconstruction, cloud_file: Path, work: Path, longest_mm: float | None, total: int,
-           depth_stats: dict | None = None, warnings: list[str] | None = None) -> dict:
+def finish(best: pycolmap.Reconstruction, cloud_file: Path, work: Path, longest_mm: float | None, total: int, views: list,
+           object_size: float, depth_stats: dict | None = None, warnings: list[str] | None = None, check: dict | None = None) -> dict:
     """Everything after the point cloud. Separate so it can be rerun without redoing the slow depth step."""
     say(85, "isolating the object")
     warnings = [] if warnings is None else warnings
@@ -401,7 +506,60 @@ def finish(best: pycolmap.Reconstruction, cloud_file: Path, work: Path, longest_
     for field in raw.dtype.names:
         tagged[field] = raw[field]
     tagged["source"] = source
-    tagged, up, offset = isolate_object(tagged, best, warnings)
+    tagged, up, offset = isolate_object(tagged, views, warnings, object_size)
+
+    # The shape from the outlines, cut off at the table. It covers whatever COLMAP couldn't measure.
+    say(87, "shaping from the outlines")
+    hull = scan_hull.carve(views, up, offset)
+    if hull is None:
+        raise ScanFailed("The piece's outline doesn't match from photo to photo. Keep it still and move the phone instead.")
+    hull_points, hull_normals, hull_colors = scan_hull.surface(hull, views)
+    flaps = trim_flaps(hull_points, views, work, object_size)
+    hull_points, hull_normals, hull_colors = hull_points[~flaps], hull_normals[~flaps], hull_colors[~flaps]
+    has_measured_nearby = np.zeros(len(hull_points), bool)
+    if len(tagged):
+        has_measured_nearby = cKDTree(tagged_xyz(tagged)).query(hull_points)[0] <= object_size * 0.012
+    measured_share = float(has_measured_nearby.mean())
+    extra = np.zeros(int((~has_measured_nearby).sum()), dtype=tagged.dtype)
+    gaps = ~has_measured_nearby
+    for index, axis in enumerate("xyz"):
+        extra[axis] = hull_points[gaps, index]
+        extra["n" + axis] = hull_normals[gaps, index]
+    for index, channel in enumerate(("red", "green", "blue")):
+        extra[channel] = hull_colors[gaps, index]
+    extra["source"] = OUTLINE
+    tagged = np.concatenate([tagged, extra])
+
+    # Where measured points cover most of the piece they set the size, so the hull's small overshoot gets trimmed off
+    xyz = tagged_xyz(tagged)
+    kind = tagged["source"]
+    trusted = kind != AI_DEPTH
+    frame_points = xyz[trusted]
+    if up is None:
+        up = scan_hull.camera_up(views)
+        offset = float(np.percentile(frame_points[kind[trusted] == MEASURED] @ up, 0.2)) if (kind == MEASURED).sum() > 2000 else float(np.percentile(frame_points @ up, 0.2))
+        has_table = False
+    else:
+        has_table = True
+    # With plenty measured, line the model up on that alone, so a leftover flap can't twist the frame
+    is_real_measured = kind[trusted] == MEASURED
+    rotation, shift = upright_frame(frame_points[is_real_measured] if is_real_measured.sum() > 2000 else frame_points, up, offset)
+    upright = xyz @ rotation.T + shift
+    if (kind == MEASURED).sum() > 2000:
+        real = upright[kind == MEASURED]
+        real_low, real_high = np.percentile(real, 0.2, axis=0), np.percentile(real, 99.8, axis=0)
+        margin = float(np.ptp(real, axis=0).max()) * 0.005
+        off_box = kind == OUTLINE
+        if measured_share >= TRUST_MEASURED_SHARE:
+            off_box = off_box & np.any((upright < real_low - margin) | (upright > real_high + margin), axis=1)
+        elif not has_table:
+            off_box = off_box & (upright[:, 1] < real_low[1] - margin)  # no table to stop the hull running on underneath
+        else:
+            off_box = np.zeros(len(tagged), bool)
+        tagged = tagged[~off_box]
+        upright = upright[~off_box]
+        kind = tagged["source"]
+        tagged = tagged[~past_flat_faces(upright, kind == MEASURED, kind == OUTLINE)]
     cloud = np.empty(len(tagged), dtype=raw.dtype)
     for field in raw.dtype.names:
         cloud[field] = tagged[field]
@@ -415,18 +573,19 @@ def finish(best: pycolmap.Reconstruction, cloud_file: Path, work: Path, longest_
     points = np.stack([cloud["x"], cloud["y"], cloud["z"]], axis=1).astype(np.float64)
     normals = np.stack([cloud["nx"], cloud["ny"], cloud["nz"]], axis=1).astype(np.float64)
     is_measured = source == MEASURED
-    # The frame and the size come from measured points only, so an estimate can never change them
-    rotation, shift = upright_frame(points[is_measured], up, offset)
+    # The frame and the size come from measured points and the outlines. An AI estimate can never change them.
+    is_real = source != AI_DEPTH
+    rotation, shift = upright_frame(points[is_real], up, offset)
     points = points @ rotation.T + shift
     normals = normals @ rotation.T
     vertices = np.asarray(mesh.vertices) @ rotation.T + shift
     vertices[:, 1] = np.maximum(vertices[:, 1], 0)  # the surface can't go through the table
 
     # Trim the extreme 0.2% so one stray point can't change the reported size
-    low = np.percentile(points[is_measured], 0.2, axis=0)
-    high = np.percentile(points[is_measured], 99.8, axis=0)
+    low = np.percentile(points[is_real], 0.2, axis=0)
+    high = np.percentile(points[is_real], 99.8, axis=0)
     sizes = high - low
-    sizes[1] = high[1] if up is not None else sizes[1]  # with a table, height is measured from the table
+    sizes[1] = high[1]  # height is measured from the table, or from the base where no table was found
     longest = float(sizes.max())
 
     if longest_mm:
@@ -437,7 +596,7 @@ def finish(best: pycolmap.Reconstruction, cloud_file: Path, work: Path, longest_
     # The mesher can balloon past the data over unmeasured faces. The surface can't be bigger than what was measured.
     margin = longest * 0.005
     box_low, box_high = low - margin, high + margin
-    box_low[1] = 0 if up is not None else box_low[1]
+    box_low[1] = 0
     vertices = np.clip(vertices, box_low, box_high) * scale
     points = points * scale
 
@@ -447,14 +606,18 @@ def finish(best: pycolmap.Reconstruction, cloud_file: Path, work: Path, longest_
     exported = export_models(final, points, colors, source, work, reach)
 
     # The measured-only version, so anyone can see exactly what the helpers added
-    if not is_measured.all():
+    if not is_measured.all() and is_measured.sum() >= 500:
         write_cloud(work / "object_measured.ply", cloud[is_measured])
-        plain = build_mesh(work / "object_measured.ply", work)
-        plain_vertices = np.clip(np.asarray(plain.vertices) @ rotation.T + shift, box_low, box_high)
-        plain_model = trimesh.Trimesh(plain_vertices * scale, plain.faces, process=False)
-        nearest = cKDTree(points[is_measured]).query(plain_model.vertices)[1]
-        plain_model.visual.vertex_colors = colors[is_measured][nearest]
-        plain_model.export(work / "model_measured.glb")
+        try:
+            plain = build_mesh(work / "object_measured.ply", work)
+        except ScanFailed:
+            warnings.append("Too little was measured directly to build a measured-only model.")
+        else:
+            plain_vertices = np.clip(np.asarray(plain.vertices) @ rotation.T + shift, box_low, box_high)
+            plain_model = trimesh.Trimesh(plain_vertices * scale, plain.faces, process=False)
+            nearest = cKDTree(points[is_measured]).query(plain_model.vertices)[1]
+            plain_model.visual.vertex_colors = colors[is_measured][nearest]
+            plain_model.export(work / "model_measured.glb")
 
     # Everything scan_fill.py needs to line a Hunyuan3D model up with this one, without repeating any of the above
     views = []
@@ -472,7 +635,7 @@ def finish(best: pycolmap.Reconstruction, cloud_file: Path, work: Path, longest_
         })
     np.savez(
         work / "frame.npz", points=points, normals=normals, colors=colors, source=source,
-        has_table=up is not None, longest=sizes.max() * scale, height=sizes[1] * scale,
+        has_table=has_table, longest=sizes.max() * scale, height=sizes[1] * scale,
         rotation=rotation, shift=shift, scale=scale,
     )
     (work / "views.json").write_text(json.dumps(views))
@@ -480,16 +643,23 @@ def finish(best: pycolmap.Reconstruction, cloud_file: Path, work: Path, longest_
     aligned = best.num_reg_images()
     if aligned < total * 0.8:
         warnings.append(f"{total - aligned} of {total} photos couldn't be used, so some sides may be less detailed.")
-    if int(is_measured.sum()) < 20_000:
-        warnings.append("Few points landed on the piece: expect a rough surface. Dust shiny plastic with powder and redo.")
+    if exported["shares"]["outline"] > exported["shares"]["measured"]:
+        warnings.append(
+            "Most of this surface comes from the piece's outline, so its overall shape and size are good but dents and "
+            "hollows won't show. Dusting it with powder lets more of it get measured."
+        )
 
     report = {
+        "mode": "measured",
+        "outline_agreement": round(check["agreement"], 3) if check else None,
+        "object_only_solve": bool(check["object_only"]) if check else False,
         "photos_uploaded": total,
         "photos_used": aligned,
         "reprojection_error_px": round(best.compute_mean_reprojection_error(), 3),
         "points_measured": measured_points,
         "points_on_object": int(is_measured.sum()),
         "points_ai_depth": int((source == AI_DEPTH).sum()),
+        "points_outline": int((source == OUTLINE).sum()),
         "faces": exported["faces"],
         "surface_pct": exported["shares"],
         "size_mm": [round(float(s) * scale * 1000, 2) for s in sizes] if longest_mm else None,
@@ -507,16 +677,100 @@ def finish(best: pycolmap.Reconstruction, cloud_file: Path, work: Path, longest_
     return report
 
 
+def past_flat_faces(points: np.ndarray, is_measured: np.ndarray, is_outline: np.ndarray) -> np.ndarray:
+    """Outline points sticking out past a flat side that was really measured.
+
+    Looks at each side of the measured points' box, except the bottom. If measured points cover a good part of that
+    side, it's a real flat face and nothing can be outside it. A rounded side only touches its box along a line, so it
+    doesn't count, and keeps its outline.
+    """
+    measured = points[is_measured]
+    low, high = np.percentile(measured, 0.2, axis=0), np.percentile(measured, 99.8, axis=0)
+    longest = float((high - low).max())
+    slab, margin = longest * FACE_THICKNESS, longest * 0.005
+    outside = np.zeros(len(points), bool)
+    for axis, direction in ((0, -1), (0, 1), (1, 1), (2, -1), (2, 1)):
+        plane = low[axis] if direction < 0 else high[axis]
+        on_side = measured[np.abs(measured[:, axis] - plane) < slab]
+        if not len(on_side):
+            continue
+        across = [other for other in range(3) if other != axis]
+        cells = np.floor((on_side[:, across] - low[across]) / np.maximum(high[across] - low[across], 1e-9) * FACE_CELLS).astype(int)
+        cells = cells[np.all((cells >= 0) & (cells < FACE_CELLS), axis=1)]
+        covered = len(np.unique(cells, axis=0)) / FACE_CELLS**2
+        print(f"flat face check: axis={axis} direction={direction} covered={covered:.2f}", flush=True)
+        if covered >= FACE_COVERAGE:
+            outside |= is_outline & (direction * (points[:, axis] - plane) > margin)
+    return outside
+
+
+def trim_flaps(hull_points: np.ndarray, views: list, work: Path, object_size: float) -> np.ndarray:
+    """Which hull points stick out past surface that was really measured."""
+    fused = work / "fused.ply"
+    visibility, order_file = work / "fused.ply.vis", work / "dense" / "stereo" / "fusion.cfg"
+    if not (fused.exists() and visibility.exists() and order_file.exists()):
+        return np.zeros(len(hull_points), bool)
+    cloud = tagged_xyz(read_cloud(fused))
+    inside, seen = scan_hull.object_votes(views, cloud)
+    return scan_hull.seen_through(
+        hull_points, views, cloud, (seen >= 2) & (inside >= seen * 0.8), scan_hull.read_visibility(visibility),
+        order_file.read_text().split(), object_size * 0.01,
+    )
+
+
+def measure_final(work: Path, longest_mm: float | None, check_mm: float | None, report: dict) -> None:
+    """Sets the real size on the finished model files, then reads the size back off them.
+
+    Every step before this works on points, and building a mesh can lose some of them, so the size has to be measured
+    on the mesh itself. That way the numbers in the report are always the numbers in the file. Run again after gap
+    filling, since that changes the mesh.
+    """
+    loaded = trimesh.load(work / "model.glb", process=False)
+    model = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+    sizes = model.bounds[1] - model.bounds[0]
+    longest = float(sizes.max())
+    if longest <= 0:
+        raise ScanFailed("The finished model came out empty, so it can't be measured. Please try again with more photos.")
+    factor = longest_mm / 1000 / longest if longest_mm else 1.0
+    for name in ("model.glb", "model_sources.glb", "model_measured.glb"):
+        path = work / name
+        if path.exists():
+            part = trimesh.load(path, process=False)
+            part = part.to_geometry() if isinstance(part, trimesh.Scene) else part
+            part.apply_scale(factor)
+            part.export(path)
+    sizes = sizes * factor
+    report["size_mm"] = [round(float(side) * 1000, 2) for side in sizes] if longest_mm else None
+    report["proportions"] = [round(float(side / sizes.max()), 4) for side in sizes]
+    report["scaled_from_mm"] = longest_mm
+    report["checked_with_mm"] = check_mm
+    report["check"] = None
+    # The longest side matches by definition, since it sets the scale. A second measurement is the real test.
+    if longest_mm and check_mm:
+        others = sorted(sizes * 1000)[:2]
+        closest = float(min(others, key=lambda side: abs(side - check_mm)))
+        off = closest - check_mm
+        report["check"] = {"typed_mm": check_mm, "model_mm": round(closest, 2), "off_mm": round(off, 2), "off_pct": round(off / check_mm * 100, 1)}
+        if abs(off / check_mm) > 0.05:
+            report["warnings"].append(
+                f"The side you measured as {check_mm} mm is {closest:.1f} mm on the model ({off / check_mm * 100:+.1f}%). "
+                "Treat these sizes with caution, or re-measure and scan again."
+            )
+    (work / "report.json").write_text(json.dumps(report, indent=2))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("photos", type=Path)
     parser.add_argument("work", type=Path)
     parser.add_argument("--longest-mm", type=float)
-    parser.add_argument("--ai-python", help="python of the environment with torch: turns on the plain-face estimate")
+    parser.add_argument("--check-mm", type=float, help="another side of the piece, to test the scale against")
+    parser.add_argument("--ai-python", required=True, help="python of the environment with rembg and torch")
+    parser.add_argument("--ai-depth", action="store_true", help="turns on the plain-face estimate")
     args = parser.parse_args()
     args.work.mkdir(parents=True, exist_ok=True)
     try:
-        report = run(args.photos, args.work, args.longest_mm, args.ai_python)
+        report = run(args.photos, args.work, args.longest_mm, args.ai_python, args.ai_depth, args.check_mm)
     except ScanFailed as exc:
         print(f"ERROR {exc}", flush=True)
         return 2

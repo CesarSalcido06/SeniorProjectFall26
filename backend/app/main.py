@@ -115,6 +115,7 @@ def create_app(settings: Settings | None = None, meshy=None) -> FastAPI:
     @app.post("/api/scans/{job_id}/start")
     async def start_scan(  # async: worker.submit needs the event loop
         job_id: str, longest_mm: float | None = Form(None), ai_depth: bool = Form(True), ai_fill: bool = Form(True),
+        check_mm: float | None = Form(None),
     ):
         """longest_mm is the piece's longest side measured with a ruler; it sets the model's real size.
 
@@ -125,10 +126,12 @@ def create_app(settings: Settings | None = None, meshy=None) -> FastAPI:
             raise HTTPException(409, "This scan already started")
         if longest_mm is not None and longest_mm <= 0:
             raise HTTPException(422, "The longest side must be above zero.")
+        if check_mm is not None and check_mm <= 0:
+            raise HTTPException(422, "The second side must be above zero.")
         count = sum(1 for info in job["files"].values() if info.get("view") == "scan")
         if count < settings.scan_min_photos:
             raise HTTPException(422, f"A scan needs at least {settings.scan_min_photos} photos (it has {count}).")
-        job = store.update(job_id, status="queued", progress=0, scan={"longest_mm": longest_mm, "ai_depth": ai_depth, "ai_fill": ai_fill})
+        job = store.update(job_id, status="queued", progress=0, scan={"longest_mm": longest_mm, "check_mm": check_mm, "ai_depth": ai_depth, "ai_fill": ai_fill})
         worker.submit(job_id)
         return public(job)
 

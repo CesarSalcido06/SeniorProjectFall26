@@ -23,14 +23,16 @@ def available() -> bool:
     return PYTHON.exists()
 
 
-def run(photos: Path, work: Path, longest_mm: float | None, ai_depth: bool, progress) -> dict:
-    """Returns the report. work/model.glb is the model. Raises ScanError with a message for the user."""
+def run(photos: Path, work: Path, longest_mm: float | None, ai_depth: bool, progress, check_mm: float | None = None) -> dict:
+    """Returns the report. If its mode is "measured", work/model.glb is the model. Raises ScanError with a message for the user."""
     work.mkdir(parents=True, exist_ok=True)
-    cmd = [str(PYTHON), str(SCRIPT), str(photos), str(work)]
+    cmd = [str(PYTHON), str(SCRIPT), str(photos), str(work), "--ai-python", str(AI_PYTHON)]
     if longest_mm:
         cmd += ["--longest-mm", str(longest_mm)]
+    if check_mm:
+        cmd += ["--check-mm", str(check_mm)]
     if ai_depth:
-        cmd += ["--ai-python", str(AI_PYTHON)]
+        cmd += ["--ai-depth"]
     failure = None
     log_lines: list[str] = []
     with (work / "scan.log").open("w") as log:
@@ -62,6 +64,18 @@ def pick_fill_photos(work: Path) -> dict[str, Path]:
     if done.returncode != 0:
         raise ScanError(f"Couldn't pick photos for the gap fill: {done.stdout[-300:]} {done.stderr[-300:]}")
     return {view: Path(path) for view, path in json.loads(done.stdout.strip().splitlines()[-1]).items()}
+
+
+def use_estimate(work: Path, ai_model: Path) -> dict:
+    """For a scan that couldn't be measured: makes the AI model the result. Returns the updated report."""
+    with (work / "fill.log").open("w") as log:
+        done = subprocess.run(
+            [str(PYTHON), str(FILL_SCRIPT), "estimate", str(work), str(ai_model)],
+            stdout=log, stderr=subprocess.STDOUT, timeout=TIMEOUT_SECONDS,
+        )
+    if done.returncode != 0:
+        raise ScanError(f"Finishing the AI model crashed (exit {done.returncode}); see {work / 'fill.log'}")
+    return json.loads((work / "report.json").read_text())
 
 
 def fill_gaps(work: Path, ai_model: Path) -> dict:

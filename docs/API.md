@@ -47,10 +47,13 @@ Keep the same distance and height for every shot, and don't move the object betw
 2. `POST /api/scans/{id}/photos` (form field `photo`) adds one photo. Returns `{"name", "count", "blurry"}`. Blurry photos are flagged, not refused.
 3. `POST /api/scans/{id}/start` starts it. Form fields, all optional:
    - `longest_mm`: the piece's longest side, which sets the real size
+   - `check_mm`: another side of the piece. It doesn't change the model; the report says how close the model's side came, which is the real test of the scale (the longest side always matches, because it sets the scale)
    - `ai_depth` (default `true`): estimates plain faces the scan can't measure
-   - `ai_fill` (default `true`): patches unseen areas like the underside from an AI model
+   - `ai_fill` (default `true`): patches unseen areas like the underside from an AI model, and makes the estimate described below when photos can't be measured
 
-A finished job has `scan.report`, including `size_mm` (from measured points only), `surface_pct` (`measured`, `ai_depth`, `ai_fill`, `smoothed`), `ai_depth_check_mm`, `ai_fill_fit_mm` and `warnings`.
+A finished job has `scan.report`, including `mode`, `size_mm` (read off the finished model file), `check` (`typed_mm`, `model_mm`, `off_mm`, `off_pct`, or null), `surface_pct` (`measured`, `outline`, `ai_depth`, `ai_fill`, `smoothed`), `outline_agreement`, `ai_depth_check_mm`, `ai_fill_fit_mm` and `warnings`.
+
+`mode` is `measured` when the photos go around the piece and its outlines agree. It's `estimate` when they don't, for example because the piece was turned instead of the phone: the model is then an AI guess from one photo, `estimate_reason` says why, and only `longest_mm` is real. With `ai_fill` off, that case fails with the same reason instead.
 
 Files with `kind: "model"` are the model to import. Files with `kind: "scan_view"` are for looking at it, not importing: `model_sources.glb` (colored by source) and `model_measured.glb` (measured points only).
 

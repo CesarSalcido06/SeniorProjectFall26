@@ -108,7 +108,8 @@ class Generator:
         self._queue.put(task_id)
         return task_id
 
-    def submit_scan(self, photos: list[bytes], longest_mm: float | None, ai_depth: bool = True, ai_fill: bool = True) -> str:
+    def submit_scan(self, photos: list[bytes], longest_mm: float | None, ai_depth: bool = True, ai_fill: bool = True,
+                    check_mm: float | None = None) -> str:
         task_id = uuid.uuid4().hex[:12]
         photo_dir = DATA_DIR / task_id / "photos"
         photo_dir.mkdir(parents=True, exist_ok=True)
@@ -116,7 +117,8 @@ class Generator:
             (photo_dir / f"{index:04d}.jpg").write_bytes(data)
         self.tasks[task_id] = {
             "id": task_id, "kind": "scan", "status": "PENDING", "progress": 0, "stage": "queued",
-            "engine": "colmap", "longest_mm": longest_mm, "ai_depth": ai_depth, "ai_fill": ai_fill, "files": [], "report": None, "error": None,
+            "engine": "colmap", "longest_mm": longest_mm, "check_mm": check_mm, "ai_depth": ai_depth, "ai_fill": ai_fill,
+            "files": [], "report": None, "error": None,
             "created_at": time.time(), "seconds": None,
         }
         self._queue.put(task_id)
@@ -183,8 +185,10 @@ class Generator:
             self._set(task_id, progress=int(pct * share), stage=stage)
 
         work = task_dir / "work"
-        report = scan.run(task_dir / "photos", work, task["longest_mm"], task["ai_depth"], progress)
-        if task["ai_fill"]:
+        report = scan.run(task_dir / "photos", work, task["longest_mm"], task["ai_depth"], progress, task["check_mm"])
+        if report.get("mode") == "estimate":
+            report = self._estimate_scan(task_id, work, report, task["ai_fill"])
+        elif task["ai_fill"]:
             report = self._fill_scan_gaps(task_id, work, report)
 
         (task_dir / "model.glb").write_bytes((work / "model.glb").read_bytes())
@@ -204,6 +208,29 @@ class Generator:
             seconds=round(time.monotonic() - started, 1),
         )
 
+    def _estimate_scan(self, task_id: str, work: Path, report: dict, ai_allowed: bool) -> dict:
+        """The photos can't be measured, so the AI makes the shape and the typed measurement sets its size."""
+        if not ai_allowed:
+            raise scan.ScanError(f"{report['estimate_reason']} Turn on the AI option to get an estimated model instead.")
+        try:
+            self._set(task_id, progress=60, stage="AI model from the best photo")
+            if self._rembg is None:
+                from hy3dgen.rembg import BackgroundRemover
+
+                self._rembg = BackgroundRemover()
+            cutout = self._rembg(Image.open(report["estimate_photo"]).convert("RGB"))
+            mesh = self.engine.generate({"front": cutout}, texture=True, progress=lambda pct, stage: None)
+            mesh.export(work / "ai.glb")
+            self.engine.unload()
+            self._set(task_id, progress=96, stage="sizing the model")
+            return scan.use_estimate(work, work / "ai.glb")
+        except scan.ScanError:
+            raise
+        except Exception as exc:
+            traceback.print_exc()
+            self.engine.unload()
+            raise scan.ScanError(f"{report['estimate_reason']} The AI model didn't work either ({type(exc).__name__}).")
+
     def _fill_scan_gaps(self, task_id: str, work: Path, report: dict) -> dict:
         """Patches what the scan missed. A failure here can't cost the user their scan, so it only adds a warning."""
         try:
@@ -222,7 +249,7 @@ class Generator:
         except Exception as exc:
             traceback.print_exc()
             self.engine.unload()
-            report["warnings"].append(f"The AI gap fill didn't run, so unseen areas are still missing ({type(exc).__name__}).")
+            report["warnings"].append(f"The AI gap fill didn't run, so the shape comes from the measured points and the outlines only ({type(exc).__name__}).")
             (work / "report.json").write_text(json.dumps(report, indent=2))
             return report
 
@@ -300,11 +327,11 @@ def create_task(req: TaskRequest):
 @app.post("/scans", status_code=201)
 async def create_scan(
     photos: list[UploadFile] = File(...), longest_mm: float | None = Form(None),
-    ai_depth: bool = Form(True), ai_fill: bool = Form(True),
+    ai_depth: bool = Form(True), ai_fill: bool = Form(True), check_mm: float | None = Form(None),
 ):
     if not scan.available():
         raise HTTPException(501, "Photogrammetry isn't installed (see generator/README.md)")
-    return {"result": gen.submit_scan([await photo.read() for photo in photos], longest_mm, ai_depth, ai_fill)}
+    return {"result": gen.submit_scan([await photo.read() for photo in photos], longest_mm, ai_depth, ai_fill, check_mm)}
 
 
 @app.post("/tasks/{task_id}/rig", status_code=201)

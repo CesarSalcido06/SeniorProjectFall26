@@ -145,6 +145,7 @@ class Worker:
             photos = sorted(job_dir / name for name, info in job["files"].items() if info.get("view") == "scan")
             task_id = await self.meshy.create_scan(
                 photos, settings.get("longest_mm"), settings.get("ai_depth", True), settings.get("ai_fill", True),
+                settings.get("check_mm"),
             )
             self.store.update(job_id, meshy_task_id=task_id)
         self.store.update(job_id, status="generating")

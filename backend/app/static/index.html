@@ -66,6 +66,7 @@
     .src-measured { background: #2f80ed; }
     .src-depth { background: #f59e0b; }
     .src-fill { background: #db2777; }
+    .src-outline { background: #10b981; }
     .src-smooth { background: #969696; }
     .bad { color: var(--bad); } .good { color: var(--good); } .warn { color: var(--warn); }
 
@@ -95,13 +96,14 @@
       <details id="tips">
         <summary>How to shoot it (read this first)</summary>
         <ol class="tips">
+          <li><b>Walk around the piece. Don't turn it.</b> Move the phone all the way around and leave the piece exactly where it is. If it gets turned or flipped between shots, it can't be measured, and you'll get an AI estimate instead.</li>
           <li><b>Put it on newspaper or printed text.</b> A patterned sheet lets the software work out where the phone was.</li>
           <li><b>Shiny or plain plastic? Dust it first.</b> Dry shampoo, talc, or foot powder, thin and even. Shine and blank color can't be measured.</li>
           <li><b>Bright, soft light, no flash.</b> Near a window or under a ceiling light works. Avoid hard shadows.</li>
-          <li><b>Move the phone, never the piece.</b> Don't touch or bump the sheet between shots.</li>
+          <li><b>Don't touch or bump the sheet</b> between shots.</li>
           <li><b>Take 30 to 50 photos in 3 circles:</b> low, middle, and high, a small step between shots. Each one should overlap the last by about two thirds.</li>
           <li><b>Fill about a third of the frame.</b> Hold still and tap the piece to focus. Keep the same zoom the whole time, and don't use the ultra-wide lens.</li>
-          <li><b>Measure the longest side</b> with a ruler or calipers. That one number sets the real size of the whole model.</li>
+          <li><b>Measure the longest side</b> with a ruler or calipers. That one number sets the real size of the whole model. Measure a second side too: that one tests whether the scan is right.</li>
         </ol>
         <div class="muted" style="margin-top:8px">The bottom touching the sheet can't be seen. With AI gap fill on, it gets filled in and marked as not measured. Otherwise it stays open.</div>
       </details>
@@ -123,10 +125,14 @@
         <input id="longest" type="number" inputmode="decimal" min="0" step="0.1" placeholder="e.g. 62.5">
       </label>
       <div class="muted">Leave blank if you have no ruler: you'll get the right shape and proportions, but no real size.</div>
+      <label class="field" for="checkSide">A second side (mm, optional)
+        <input id="checkSide" type="number" inputmode="decimal" min="0" step="0.1" placeholder="e.g. 35">
+      </label>
+      <div class="muted">The longest side always matches, because it sets the scale. This one shows how close the model really is.</div>
 
-      <label class="check"><input id="aiDepth" type="checkbox" checked> AI help on plain faces <span class="muted">(estimates what the scan can't measure)</span></label>
-      <label class="check"><input id="aiFill" type="checkbox" checked> AI gap fill <span class="muted">(completes unseen areas like the underside; adds about 2 min)</span></label>
-      <div class="muted">The real size always comes from measured points. Estimated areas are colored in the result, so you can tell them apart.</div>
+      <label class="check"><input id="aiDepth" type="checkbox" checked> AI help on plain faces <span class="muted">(estimates faces the scan can't measure)</span></label>
+      <label class="check"><input id="aiFill" type="checkbox" checked> AI shape <span class="muted">(completes unseen areas like the underside, and makes an estimate if the scan can't be measured; adds about 2 min)</span></label>
+      <div class="muted">Proportions come from the photos whenever they can be measured. Estimated areas are colored in the result, so you can tell them apart.</div>
 
       <button id="startScan" class="wide" disabled>Start scan</button>
       <button id="discardScan" class="wide ghost small danger" hidden>Discard these photos</button>
@@ -312,6 +318,7 @@ function clearScan() {
   waiting.length = 0;
   $('shots').innerHTML = '';
   $('longest').value = '';
+  $('checkSide').value = '';
   renderScan();
 }
 
@@ -322,6 +329,8 @@ $('startScan').onclick = async () => {
   const body = new FormData();
   const longest = parseFloat($('longest').value);
   if (longest > 0) body.append('longest_mm', longest);
+  const checkSide = parseFloat($('checkSide').value);
+  if (longest > 0 && checkSide > 0) body.append('check_mm', checkSide);
   body.append('ai_depth', $('aiDepth').checked);
   body.append('ai_fill', $('aiFill').checked);
   $('startScan').disabled = true;
@@ -404,8 +413,15 @@ const STATUS = { uploading: 'Waiting for photos', queued: 'Waiting in line', cla
 function scanSummary(j) {
   const r = j.scan && j.scan.report;
   if (!r) return '';
+  const isEstimate = r.mode === 'estimate';
+  const banner = isEstimate
+    ? `<div class="warnings"><b>AI estimate, not a measured scan.</b> ${esc(r.estimate_reason)} Only the ${r.scaled_from_mm ? esc(r.scaled_from_mm) + ' mm you typed is real; the other sides are the AI\'s guess.' : 'shape is available, and it\'s the AI\'s guess.'}</div>`
+    : '';
+  const checked = r.check
+    ? `<div class="muted report">Second side: you measured ${esc(r.check.typed_mm)} mm, the model has ${esc(r.check.model_mm)} mm (off by ${Math.abs(r.check.off_mm)} mm, ${Math.abs(r.check.off_pct)}%)</div>`
+    : '';
   const size = r.size_mm
-    ? `<div class="size">${r.size_mm[0]} × ${r.size_mm[2]} × ${r.size_mm[1]} mm</div><div class="muted">length × width × height, from your ${esc(r.scaled_from_mm)} mm measurement</div>`
+    ? `<div class="size">${r.size_mm[0]} × ${r.size_mm[2]} × ${r.size_mm[1]} mm</div><div class="muted">length × width × height, read off the finished model and scaled from your ${esc(r.scaled_from_mm)} mm measurement</div>${checked}`
     : `<div class="size">${r.proportions[0]} : ${r.proportions[2]} : ${r.proportions[1]}</div><div class="muted">proportions only: no real size was entered</div>`;
   const facts = [
     `${r.photos_used} of ${r.photos_uploaded} photos used`,
@@ -414,15 +430,15 @@ function scanSummary(j) {
     r.seconds ? `${Math.round(r.seconds / 60)} min` : '',
   ].filter(Boolean).join(' · ');
   const s = r.surface_pct;
-  const estimated = s && (s.ai_depth + s.ai_fill + s.smoothed) > 0;
+  const estimated = s && ((s.outline || 0) + s.ai_depth + s.ai_fill + s.smoothed) > 0;
   const seg = (pct, cls) => pct > 0 ? `<span class="${cls}" style="width:${pct}%"></span>` : '';
   const key = (pct, cls, label) => pct > 0 ? `<span><i class="${cls}"></i>${label} ${pct}%</span>` : '';
   const sources = estimated ? `<div class="sources" role="img" aria-label="${s.measured}% of the surface measured">
-      ${seg(s.measured, 'src-measured')}${seg(s.ai_depth, 'src-depth')}${seg(s.ai_fill, 'src-fill')}${seg(s.smoothed, 'src-smooth')}</div>
-    <div class="source-key">${key(s.measured, 'src-measured', 'Measured')}${key(s.ai_depth, 'src-depth', 'AI depth')}${key(s.ai_fill, 'src-fill', 'AI fill')}${key(s.smoothed, 'src-smooth', 'Smoothed')}</div>
+      ${seg(s.measured, 'src-measured')}${seg(s.outline || 0, 'src-outline')}${seg(s.ai_depth, 'src-depth')}${seg(s.ai_fill, 'src-fill')}${seg(s.smoothed, 'src-smooth')}</div>
+    <div class="source-key">${key(s.measured, 'src-measured', 'Measured')}${key(s.outline || 0, 'src-outline', 'From outlines')}${key(s.ai_depth, 'src-depth', 'AI depth')}${key(s.ai_fill, 'src-fill', 'AI fill')}${key(s.smoothed, 'src-smooth', 'Smoothed')}</div>
     ${r.ai_depth_check_mm && s.ai_depth > 0 ? `<div class="muted report">AI depth self-check: off by ${r.ai_depth_check_mm.median} mm (median) on measured points it wasn't shown</div>` : ''}` : '';
   const warnings = (r.warnings || []).length ? `<ul class="warnings">${r.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>` : '';
-  return `${size}${sources}<div class="muted report">${facts}</div>${warnings}`;
+  return `${banner}${size}${sources}<div class="muted report">${facts}</div>${warnings}`;
 }
 
 function jobHtml(j) {

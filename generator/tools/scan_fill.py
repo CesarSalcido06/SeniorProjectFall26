@@ -1,12 +1,16 @@
-"""Fills in what a scan couldn't see (like the underside) using a Hunyuan3D model of the same piece.
+"""Uses a Hunyuan3D model of the same piece for whatever a scan couldn't measure.
 
-Runs after scan_pipeline.py, in two steps, with the generator making the Hunyuan3D model in between:
-  scan_fill.py pick <work dir>           picks 4 photos around the piece and crops them to <work dir>/ai_views
-  scan_fill.py merge <work dir> <ai.glb> lines the model up with the scan and uses it where the scan has nothing
+Runs after scan_pipeline.py, with the generator making the Hunyuan3D model in between:
+  scan_fill.py pick <work dir>              picks 4 photos around the piece and crops them to <work dir>/ai_views
+  scan_fill.py merge <work dir> <ai.glb>    lines the model up with the scan and uses it where nothing was measured
+  scan_fill.py estimate <work dir> <ai.glb> for a scan that couldn't be measured: the model is all there is, so it just
+                                            gets stood upright and sized from the typed measurement
 
 The rules that keep the scan's accuracy:
   - The scan's surface is never remeshed or moved. Hunyuan's model is only used for patches in its holes.
   - The size comes from the scan. Hunyuan's model is stretched to fit it, and can't stick out past it.
+  - Hunyuan's model can stand in for the outline's surface, but only if it stays close to it: outlines come from the
+    photos, so a big disagreement means the AI's the one that's wrong.
   - If a camera saw straight past a spot (like the table through a hole), nothing gets added there.
   - Patches need Hunyuan points behind them. Only the base on the table may be closed with nothing behind it.
   - If the two shapes don't line up well, the fill gets rejected and the scan is left as it was.
@@ -23,7 +27,7 @@ import trimesh
 from PIL import Image
 from scipy.spatial import cKDTree
 
-from scan_pipeline import AI_FILL, build_mesh, export_models, read_cloud, write_cloud  # noqa: F401
+from scan_pipeline import AI_FILL, OUTLINE, ScanFailed, build_mesh, export_models, measure_final, read_cloud, write_cloud  # noqa: F401
 
 # The fill is thrown out if the model misses the scan's points by more than this, as a fraction of the longest side
 MAX_FIT_ERROR = 0.035
@@ -31,6 +35,8 @@ MAX_FIT_ERROR = 0.035
 GAP_DISTANCE = 0.02
 # Mesh within this distance (fraction of longest side) of a real point counts as backed by data
 REACH = 0.012
+# How far inside the outline's surface a Hunyuan point may sit (fraction of longest side) and still be believed
+MAX_INSIDE_OUTLINE = 0.08
 
 
 def camera_right(forward: np.ndarray) -> np.ndarray:
@@ -62,7 +68,9 @@ def pick(work: Path) -> dict:
         for index in np.argsort(score):
             if index not in used:
                 break
-        if azimuth_off[index] > 40:  # nothing shot from this side: Hunyuan is better off without a poor stand-in
+        # Nothing shot from this side: Hunyuan is better off without a poor stand-in. It does need a front, though,
+        # and align() tries every way of turning the model, so the closest photo will do.
+        if azimuth_off[index] > 40 and name != "front":
             continue
         used.add(index)
         with Image.open(work / "images" / views[index]["name"]) as photo:
@@ -73,8 +81,6 @@ def pick(work: Path) -> dict:
             box = [mid_x - side / 2, mid_y - side / 2, mid_x + side / 2, mid_y + side / 2]
             photo.convert("RGB").crop([int(v) for v in box]).save(out / f"{name}.jpg", quality=95)
         picked[name] = str(out / f"{name}.jpg")
-    if "front" not in picked:
-        raise ValueError("No photo looks at the front of the piece")
     return picked
 
 
@@ -234,7 +240,7 @@ def bend_to_scan(moved: np.ndarray, scan_points: np.ndarray, longest: float) -> 
 
 def merge(work: Path, ai_file: Path) -> dict:
     frame = np.load(work / "frame.npz")
-    points, normals, colors, source = frame["points"], frame["normals"], frame["colors"], frame["source"]
+    every_point, every_normal, every_color, every_source = frame["points"], frame["normals"], frame["colors"], frame["source"]
     longest = float(frame["longest"])
     report_path = work / "report.json"
     report = json.loads(report_path.read_text())
@@ -242,7 +248,8 @@ def merge(work: Path, ai_file: Path) -> dict:
     loaded = trimesh.load(ai_file, process=False)
     ai_mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
     rng = np.random.default_rng(0)
-    scan_subset = points[rng.choice(len(points), min(len(points), 12_000), replace=False)]
+    # The outline's surface counts here: it's what shows where the whole object is when little was measured
+    scan_subset = every_point[rng.choice(len(every_point), min(len(every_point), 12_000), replace=False)]
     ai_samples, faces = trimesh.sample.sample_surface(ai_mesh, 60_000, seed=0)
     ai_normals = ai_mesh.face_normals[faces]
 
@@ -252,9 +259,9 @@ def merge(work: Path, ai_file: Path) -> dict:
         report["ai_fill_points"] = 0
         report["warnings"].append(
             f"The AI model didn't line up with the scan (off by {fit_error * 1000:.1f} mm), so it wasn't used. "
-            "Unseen areas like the underside are still missing."
+            "The shape comes from the measured points and the outlines only."
         )
-        report_path.write_text(json.dumps(report, indent=2))
+        measure_final(work, report.get("scaled_from_mm"), report.get("checked_with_mm"), report)
         return report
 
     moved = bend_to_scan(moved, scan_subset, longest)
@@ -265,20 +272,39 @@ def merge(work: Path, ai_file: Path) -> dict:
 
     # What stays: in the scan's gaps, and inside the box the scan measured
     margin = longest * 0.005
-    low, high = np.percentile(points, 0.2, axis=0) - margin, np.percentile(points, 99.8, axis=0) + margin
+    low, high = np.percentile(every_point, 0.2, axis=0) - margin, np.percentile(every_point, 99.8, axis=0) + margin
     if bool(frame["has_table"]):
         low[1] = 0.0
     inside = np.all((moved >= low) & (moved <= high), axis=1)
-    open_space = cKDTree(points).query(moved)[0] > longest * GAP_DISTANCE
+    # Measured points always win, so only they can rule a spot out. The outline's surface is up for replacing.
+    is_outline = every_source == OUTLINE
+    real_points = every_point[~is_outline]
+    open_space = np.ones(len(moved), bool)
+    if len(real_points):
+        open_space = cKDTree(real_points).query(moved)[0] > longest * GAP_DISTANCE
+    if is_outline.any():
+        # Above zero is outside the outline's surface, below zero is inside it
+        hull_points, hull_normals = every_point[is_outline], every_normal[is_outline]
+        nearest = cKDTree(hull_points).query(moved)[1]
+        signed = np.sum((moved - hull_points[nearest]) * hull_normals[nearest], axis=1)
+        inside &= (signed <= margin) & (signed >= -longest * MAX_INSIDE_OUTLINE)
     seen_through = SeenThrough(work, frame, longest)
     # Estimated points are the best stand-in for "plain but solid", since plain faces are where false votes happen.
     # With too few of them the scan has hardly any plain faces, and measured points are the right reference.
-    estimated = points[source != 0]
-    solid = estimated if len(estimated) >= 500 else points[source == 0]
+    estimated = every_point[every_source != 0]
+    solid = estimated if len(estimated) >= 500 else every_point[every_source == 0]
     seen_through.calibrate(solid[rng.choice(len(solid), min(len(solid), 20_000), replace=False)])
     report["ai_fill_carve_limit"] = round(seen_through.limit, 3)
     keep = inside & open_space & ~seen_through(moved)
     added, added_normals = moved[keep], moved_normals[keep]
+
+    # The outline's surface stays wherever Hunyuan has nothing to offer
+    stays = ~is_outline
+    if len(added):
+        stays |= cKDTree(added).query(every_point)[0] > longest * GAP_DISTANCE
+    else:
+        stays[:] = True
+    points, normals, colors, source = every_point[stays], every_normal[stays], every_color[stays], every_source[stays]
 
     # Point the normals outward from the middle of the piece: the turn above is only an estimate
     middle = (low + high) / 2
@@ -318,7 +344,26 @@ def merge(work: Path, ai_file: Path) -> dict:
     report["ai_fill_points"] = int(len(added))
     report["faces"] = exported["faces"]
     report["surface_pct"] = exported["shares"]
-    report_path.write_text(json.dumps(report, indent=2))
+    measure_final(work, report.get("scaled_from_mm"), report.get("checked_with_mm"), report)
+    return report
+
+
+def estimate(work: Path, ai_file: Path) -> dict:
+    """The scan couldn't be measured, so the AI model is the result. Only the typed measurement is real."""
+    report_path = work / "report.json"
+    report = json.loads(report_path.read_text())
+    loaded = trimesh.load(ai_file, process=False)
+    model = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+    # Stand it on y=0, centered, like a measured scan
+    low, high = model.bounds
+    model.apply_translation([-(low[0] + high[0]) / 2, -low[1], -(low[2] + high[2]) / 2])
+    model.export(work / "model.glb")
+    sources = trimesh.Trimesh(model.vertices, model.faces, process=False)
+    sources.visual.vertex_colors = np.array([219, 39, 119, 255], np.uint8)
+    sources.export(work / "model_sources.glb")
+    report["faces"] = len(model.faces)
+    report["surface_pct"] = {"measured": 0.0, "outline": 0.0, "ai_depth": 0.0, "ai_fill": 100.0, "smoothed": 0.0}
+    measure_final(work, report.get("scaled_from_mm"), None, report)
     return report
 
 
@@ -390,8 +435,13 @@ def stitch(base, closed, points, normals, added, seen_through, low, high, longes
 def main() -> int:
     work = Path(sys.argv[2])
     try:
-        result = pick(work) if sys.argv[1] == "pick" else merge(work, Path(sys.argv[3]))
-    except ValueError as exc:
+        if sys.argv[1] == "pick":
+            result = pick(work)
+        elif sys.argv[1] == "estimate":
+            result = estimate(work, Path(sys.argv[3]))
+        else:
+            result = merge(work, Path(sys.argv[3]))
+    except (ValueError, ScanFailed) as exc:
         print(f"ERROR {exc}", flush=True)
         return 2
     print(json.dumps(result), flush=True)

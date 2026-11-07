@@ -305,6 +305,23 @@ def test_scan_ai_help_can_be_turned_off(client):
     assert "model_sources.glb" not in done["files"]
 
 
+def test_scan_keeps_the_second_measurement(client):
+    job = client.post("/api/scans").json()
+    for _ in range(8):
+        client.post(f"/api/scans/{job['id']}/photos", files={"photo": ("p.jpg", photo_bytes(), "image/jpeg")})
+    res = client.post(f"/api/scans/{job['id']}/start", data={"longest_mm": "62.5", "check_mm": "35"})
+    assert res.status_code == 200
+    assert res.json()["scan"]["check_mm"] == 35
+
+
+def test_scan_rejects_a_bad_second_measurement(client):
+    job = client.post("/api/scans").json()
+    for _ in range(8):
+        client.post(f"/api/scans/{job['id']}/photos", files={"photo": ("p.jpg", photo_bytes(), "image/jpeg")})
+    res = client.post(f"/api/scans/{job['id']}/start", data={"longest_mm": "62.5", "check_mm": "-1"})
+    assert res.status_code == 422
+
+
 def test_scan_needs_enough_photos(client):
     job_id, res = start_scan_with_photos(client, photos=3)
     assert res.status_code == 422
